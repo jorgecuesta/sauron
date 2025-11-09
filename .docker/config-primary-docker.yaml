@@ -1,0 +1,58 @@
+api: true
+rpc: true
+grpc: true
+auth: true
+listen: ":3000"
+
+timeouts:
+  health_check: 5s
+  proxy: 60s
+
+redis:
+  enabled: true
+  uri: "redis://redis:6379/0"
+
+rate_limit:
+  enabled: true
+  requests_per_second: 10
+  burst: 20
+
+networks:
+  - name: "pocket"
+    api: "http://primary:8080"
+    api_listen: ":8080"
+    rpc: "http://primary:8081"
+    rpc_listen: ":8081"
+    grpc: "primary:8082"
+    grpc_listen: ":8082"
+    grpc_insecure: true
+
+# Internal nodes monitored by primary - Real Pocket Network nodes
+internals:
+  - name: fn-one
+    api: "https://fn-one-api.example.com"
+    rpc: "https://fn-one-rpc.example.com"
+    grpc: "fn-one-grpc.example.com:443"
+    grpc_insecure: false
+    network: "pocket"
+
+  - name: fn-two
+    api: "https://fn-two-api.example.com"
+    rpc: "https://fn-two-rpc.example.com"
+    grpc: "fn-two-grpc.example.com:443"
+    grpc_insecure: false
+    network: "pocket"
+
+# External Sauron rings to query
+externals:
+  - name: secondary-ring
+    token: "test-token-123"
+    rings:
+      - "http://secondary:4000"  # Secondary instance status API
+
+users:
+  - name: test-user
+    token: "test-token-123"
+    api: true
+    rpc: true
+    grpc: true

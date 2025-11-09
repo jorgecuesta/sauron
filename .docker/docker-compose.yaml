@@ -1,0 +1,80 @@
+services:
+  # Redis for distributed state sharing
+  redis:
+    image: redis:7-alpine
+    container_name: sauron-redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - sauron-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # Secondary Sauron instance (leaf node)
+  secondary:
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+    container_name: sauron-secondary
+    hostname: secondary
+    ports:
+      - "4000:4000"   # Status API
+      - "7080:7080"   # Network API proxy
+      - "7081:7081"   # Network RPC proxy
+      - "7082:7082"   # Network gRPC proxy
+    volumes:
+      - ./config-secondary-docker.yaml:/app/config.yaml:ro
+    networks:
+      - sauron-net
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # Primary Sauron instance (queries secondary as external ring)
+  primary:
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+    container_name: sauron-primary
+    hostname: primary
+    ports:
+      - "3000:3000"   # Status API
+      - "8080:8080"   # Network API proxy
+      - "8081:8081"   # Network RPC proxy
+      - "8082:8082"   # Network gRPC proxy
+    volumes:
+      - ./config-primary-docker.yaml:/app/config.yaml:ro
+    networks:
+      - sauron-net
+    depends_on:
+      redis:
+        condition: service_healthy
+      secondary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  sauron-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

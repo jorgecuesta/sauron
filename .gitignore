@@ -1,0 +1,10 @@
+bin
+.claude
+config.yaml
+
+# IDE
+*.iml
+.idea/
+
+# Binary
+sauron

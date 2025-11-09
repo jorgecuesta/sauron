@@ -1,0 +1,106 @@
+# Sauron Configuration
+# Default configuration example for production deployment
+
+# Global protocol support flags
+api: true
+rpc: true
+grpc: true
+
+# Enable authentication (requires valid user tokens)
+auth: true
+
+# Status API listen address (for /health, /ready, /metrics, /{network}/status)
+listen: ":3000"
+
+# Timeouts for health checks and proxying
+timeouts:
+  health_check: 5s  # How often to check node health
+  proxy: 60s        # Timeout for proxied requests
+
+# Rate limiting for status API (optional)
+rate_limit:
+  enabled: true
+  requests_per_second: 100  # Requests allowed per IP per second
+  burst: 200                # Burst capacity (should be >= requests_per_second)
+  trust_proxy: true         # Trust X-Forwarded-For headers (set false if not behind reverse proxy)
+
+# Optional: Redis for distributed caching (useful for multi-instance deployments)
+redis:
+  enabled: false
+  uri: "redis://localhost:6379/0"
+
+# Network proxy configuration
+# Each network gets its own set of proxy listeners
+networks:
+  - name: "pocket"
+    # Advertised URLs (returned in status API responses)
+    api: "http://localhost:8080"
+    rpc: "http://localhost:8081"
+    grpc: "localhost:8082"
+
+    # Proxy listener addresses
+    api_listen: ":8080"
+    rpc_listen: ":8081"
+    grpc_listen: ":8082"
+    grpc_insecure: true  # Use plaintext gRPC (set false for production with TLS)
+
+# Internal nodes to monitor
+# These are your own nodes that Sauron will health-check and route to
+internals:
+  - name: validator-01
+    api: "http://validator-01.internal:26660"    # Cosmos SDK API port
+    rpc: "http://validator-01.internal:26657"    # Tendermint RPC port
+    grpc: "validator-01.internal:9090"           # gRPC port (no http:// prefix)
+    network: "pocket"
+
+  - name: validator-02
+    api: "http://validator-02.internal:26660"
+    rpc: "http://validator-02.internal:26657"
+    grpc: "validator-02.internal:9090"
+    network: "pocket"
+
+  - name: fullnode-01
+    api: "http://fullnode-01.internal:26660"
+    rpc: "http://fullnode-01.internal:26657"
+    grpc: "fullnode-01.internal:9090"
+    network: "pocket"
+
+# Optional: External Sauron deployments for cross-region failover
+# Sauron can discover and route to endpoints from other Sauron instances
+externals:
+  - name: us-west-sauron
+    token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1cy13ZXN0In0.example"  # Example JWT
+    rings:
+      - "https://sauron-us-west.example.com:3000"
+
+  - name: eu-central-sauron
+    token: "c89f2e1a-4b3c-4d5e-8f6g-7h8i9j0k1l2m"  # Example UUID token
+    rings:
+      - "https://sauron-eu-central.example.com:3000"
+
+# Authentication: Users/services that can access this Sauron instance
+users:
+  - name: relayminer-prod
+    token: "rm-prod-a1b2c3d4e5f6g7h8i9j0"  # Use strong, unique tokens in production
+    api: true      # Can access API proxy
+    rpc: true      # Can access RPC proxy
+    grpc: true     # Can access gRPC proxy
+
+  - name: gateway-service
+    token: "gw-svc-x9y8z7w6v5u4t3s2r1q0"
+    api: true      # Gateway typically only needs API
+    rpc: false
+    grpc: false
+
+  - name: indexer-service
+    token: "idx-svc-m1n2o3p4q5r6s7t8u9v0"
+    api: true
+    rpc: true      # Indexer may need both API and RPC
+    grpc: false
+
+  # Example: External Sauron that can query our status API
+  - name: partner-sauron-us-east
+    token: "partner-us-east-w1x2y3z4a5b6c7d8"
+    api: true      # Partner Sauron queries our status API
+    rpc: false     # But doesn't proxy through us
+    grpc: false
