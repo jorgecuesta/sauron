@@ -18,11 +18,12 @@ type ExternalEndpoint struct {
 	RingURL      string // Which ring advertised this endpoint
 
 	// Validation state
-	IsValidated   bool      // Passed validation check
-	IsWorking     bool      // Currently healthy (not failed)
-	ErrorCount    int       // Consecutive proxy errors (5xx only)
-	LastValidated time.Time // Last successful validation
-	LastError     time.Time // Last error timestamp
+	IsValidated        bool      // Passed validation check
+	IsWorking          bool      // Currently healthy (not failed)
+	ErrorCount         int       // Consecutive proxy errors (5xx only)
+	LastValidated      time.Time // Last successful validation
+	LastError          time.Time // Last error timestamp
+	WebSocketAvailable bool      // Whether WebSocket endpoint is working (RPC only)
 
 	// Metrics
 	Height  int64         // Latest height
@@ -306,6 +307,28 @@ func (s *ExternalEndpointStore) TrackProxyError(network, endpointType, url strin
 	}
 
 	return false
+}
+
+// UpdateWebSocketAvailability updates the WebSocket availability status for an RPC endpoint
+func (s *ExternalEndpointStore) UpdateWebSocketAvailability(externalName, ringURL, network, endpointType, url string, available bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := s.makeKey(externalName, ringURL, network, endpointType, url)
+	ep, exists := s.endpoints[key]
+	if !exists {
+		return
+	}
+
+	ep.WebSocketAvailable = available
+
+	s.logger.Debug("Updated WebSocket availability for external endpoint",
+		zap.String("external", externalName),
+		zap.String("network", network),
+		zap.String("type", endpointType),
+		zap.String("url", url),
+		zap.Bool("available", available),
+	)
 }
 
 // UpdateAggregateMetrics updates aggregate endpoint count metrics

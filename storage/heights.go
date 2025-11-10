@@ -17,12 +17,13 @@ const (
 // NodeMetrics stores height and latency information for a node
 // The Dark Lord's memory of each kingdom
 type NodeMetrics struct {
-	Height         int64
-	Timestamp      time.Time
-	Source         string // "internal" or "external"
-	LatencyHistory []time.Duration
-	AvgLatency     time.Duration
-	mu             sync.Mutex
+	Height             int64
+	Timestamp          time.Time
+	Source             string // "internal" or "external"
+	LatencyHistory     []time.Duration
+	AvgLatency         time.Duration
+	WebSocketAvailable bool // Whether WebSocket endpoint is working
+	mu                 sync.Mutex
 }
 
 // HeightStore manages all node metrics using xsync for thread-safe access
@@ -88,11 +89,12 @@ func (s *HeightStore) Get(network, node, endpointType string) (*NodeMetrics, boo
 	defer metrics.mu.Unlock()
 
 	copy := &NodeMetrics{
-		Height:         metrics.Height,
-		Timestamp:      metrics.Timestamp,
-		Source:         metrics.Source,
-		LatencyHistory: make([]time.Duration, len(metrics.LatencyHistory)),
-		AvgLatency:     metrics.AvgLatency,
+		Height:             metrics.Height,
+		Timestamp:          metrics.Timestamp,
+		Source:             metrics.Source,
+		LatencyHistory:     make([]time.Duration, len(metrics.LatencyHistory)),
+		AvgLatency:         metrics.AvgLatency,
+		WebSocketAvailable: metrics.WebSocketAvailable,
 	}
 	copyDurations(copy.LatencyHistory, metrics.LatencyHistory)
 
@@ -108,11 +110,12 @@ func (s *HeightStore) GetByNetwork(network, endpointType string) map[string]*Nod
 		if keyNetwork, keyNode, keyType := parseKey(keyStr); keyNetwork == network && keyType == endpointType {
 			metrics.mu.Lock()
 			copy := &NodeMetrics{
-				Height:         metrics.Height,
-				Timestamp:      metrics.Timestamp,
-				Source:         metrics.Source,
-				LatencyHistory: make([]time.Duration, len(metrics.LatencyHistory)),
-				AvgLatency:     metrics.AvgLatency,
+				Height:             metrics.Height,
+				Timestamp:          metrics.Timestamp,
+				Source:             metrics.Source,
+				LatencyHistory:     make([]time.Duration, len(metrics.LatencyHistory)),
+				AvgLatency:         metrics.AvgLatency,
+				WebSocketAvailable: metrics.WebSocketAvailable,
 			}
 			copyDurations(copy.LatencyHistory, metrics.LatencyHistory)
 			metrics.mu.Unlock()
@@ -176,4 +179,19 @@ func copyDurations(dst, src []time.Duration) {
 	for i := 0; i < len(src) && i < len(dst); i++ {
 		dst[i] = src[i]
 	}
+}
+
+// UpdateWebSocketAvailability updates the WebSocket availability status for a node
+func (s *HeightStore) UpdateWebSocketAvailability(network, node, endpointType string, available bool) {
+	key := makeKey(network, node, endpointType)
+
+	// Get or create metrics
+	metrics, _ := s.data.LoadOrStore(key, &NodeMetrics{
+		LatencyHistory: make([]time.Duration, 0, LatencyHistorySize),
+	})
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+
+	metrics.WebSocketAvailable = available
 }

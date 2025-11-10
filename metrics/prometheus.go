@@ -38,6 +38,24 @@ var (
 		[]string{"network", "node", "type"},
 	)
 
+	// NodeWebSocketAvailable indicates if a node's WebSocket endpoint is working (1=working, 0=not working)
+	NodeWebSocketAvailable = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sauron_node_websocket_available",
+			Help: "Node WebSocket availability status (1=working, 0=not working)",
+		},
+		[]string{"network", "node", "type"},
+	)
+
+	// WebSocketCheckErrors counts failed WebSocket connectivity checks
+	WebSocketCheckErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sauron_websocket_check_errors_total",
+			Help: "Total number of failed WebSocket connectivity checks",
+		},
+		[]string{"network", "node", "type", "error_type"},
+	)
+
 	// NodeHeightStaleness tracks time since last height update
 	NodeHeightStaleness = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{

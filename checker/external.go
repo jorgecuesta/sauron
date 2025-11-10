@@ -15,6 +15,7 @@ import (
 	"sauron/storage"
 
 	tmservice "cosmossdk.io/api/cosmos/base/tendermint/v1beta1"
+	"github.com/gorilla/websocket"
 	"github.com/puzpuzpuz/xsync/v4"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -227,15 +228,41 @@ func (c *ExternalChecker) validateEndpoint(ctx context.Context, externalName, ri
 
 	// Mark as validated with the advertised height and measured latency
 	c.endpointStore.MarkValidated(externalName, ringURL, network, endpointType, url, height, latency)
-	c.logger.Debug("External endpoint validated",
-		zap.String("external", externalName),
-		zap.String("ring", ringURL),
-		zap.String("network", network),
-		zap.String("type", endpointType),
-		zap.String("url", url),
-		zap.Int64("height", height),
-		zap.Duration("validation_time", time.Since(start)),
-	)
+
+	// For RPC endpoints, also check WebSocket connectivity
+	if endpointType == "rpc" {
+		wsAvailable := c.validateWebSocketEndpoint(ctx, url)
+		c.endpointStore.UpdateWebSocketAvailability(externalName, ringURL, network, endpointType, url, wsAvailable)
+
+		// Update WebSocket availability metric
+		if wsAvailable {
+			metrics.NodeWebSocketAvailable.WithLabelValues(network, externalName, "rpc").Set(1)
+		} else {
+			metrics.NodeWebSocketAvailable.WithLabelValues(network, externalName, "rpc").Set(0)
+			metrics.WebSocketCheckErrors.WithLabelValues(network, externalName, "rpc", "connectivity_failed").Inc()
+		}
+
+		c.logger.Debug("External endpoint validated",
+			zap.String("external", externalName),
+			zap.String("ring", ringURL),
+			zap.String("network", network),
+			zap.String("type", endpointType),
+			zap.String("url", url),
+			zap.Int64("height", height),
+			zap.Duration("validation_time", time.Since(start)),
+			zap.Bool("websocket_available", wsAvailable),
+		)
+	} else {
+		c.logger.Debug("External endpoint validated",
+			zap.String("external", externalName),
+			zap.String("ring", ringURL),
+			zap.String("network", network),
+			zap.String("type", endpointType),
+			zap.String("url", url),
+			zap.Int64("height", height),
+			zap.Duration("validation_time", time.Since(start)),
+		)
+	}
 }
 
 // validateHTTPEndpoint checks if an HTTP endpoint is reachable
@@ -293,6 +320,88 @@ func (c *ExternalChecker) validateGRPCEndpoint(ctx context.Context, url string, 
 	}
 
 	return latency, nil
+}
+
+// validateWebSocketEndpoint checks if a WebSocket endpoint is working
+// Returns true if WebSocket is available and working
+func (c *ExternalChecker) validateWebSocketEndpoint(ctx context.Context, url string) bool {
+	if url == "" {
+		return false
+	}
+
+	// Build WebSocket URL
+	wsURL := url
+	if len(wsURL) > 0 && wsURL[len(wsURL)-1] == '/' {
+		wsURL = wsURL[:len(wsURL)-1]
+	}
+
+	// Convert http(s):// to ws(s)://
+	if strings.HasPrefix(wsURL, "http://") {
+		wsURL = "ws://" + wsURL[7:]
+	} else if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + wsURL[8:]
+	} else if len(wsURL) > 0 && wsURL[0] != 'w' {
+		// Assume https if no protocol specified
+		wsURL = "wss://" + wsURL
+	}
+	wsURL += "/websocket"
+
+	// Create WebSocket dialer with timeout
+	dialer := websocket.DefaultDialer
+	dialer.HandshakeTimeout = 3 * time.Second
+
+	// Connect to WebSocket
+	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		c.logger.Debug("WebSocket connection failed for external endpoint",
+			zap.String("url", wsURL),
+			zap.Error(err),
+		)
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Set read deadline for response
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		c.logger.Debug("Failed to set read deadline for external endpoint",
+			zap.String("url", wsURL),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	// Send a simple subscription test
+	subscribeMsg := []byte(`{"jsonrpc":"2.0","method":"subscribe","id":1,"params":{"query":"tm.event='NewBlock'"}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, subscribeMsg); err != nil {
+		c.logger.Debug("WebSocket write failed for external endpoint",
+			zap.String("url", wsURL),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	// Try to read response
+	_, _, err = conn.ReadMessage()
+	if err != nil {
+		c.logger.Debug("WebSocket read failed for external endpoint",
+			zap.String("url", wsURL),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	// Cleanup: unsubscribe and close gracefully
+	unsubscribeMsg := []byte(`{"jsonrpc":"2.0","method":"unsubscribe","id":2,"params":{"query":"tm.event='NewBlock'"}}`)
+	_ = conn.WriteMessage(websocket.TextMessage, unsubscribeMsg)
+
+	// Send close frame
+	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+
+	c.logger.Debug("WebSocket check successful for external endpoint",
+		zap.String("url", wsURL),
+	)
+
+	return true
 }
 
 // getGRPCConnection returns an existing connection or creates a new one
@@ -418,6 +527,20 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 
 		// Endpoint has recovered! Mark it as validated and working again
 		c.endpointStore.MarkValidated(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, ep.Height, latency)
+
+		// For RPC endpoints, also check WebSocket connectivity after recovery
+		if ep.Type == "rpc" {
+			wsAvailable := c.validateWebSocketEndpoint(ctx, ep.URL)
+			c.endpointStore.UpdateWebSocketAvailability(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, wsAvailable)
+
+			// Update WebSocket availability metric
+			if wsAvailable {
+				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, "rpc").Set(1)
+			} else {
+				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, "rpc").Set(0)
+				metrics.WebSocketCheckErrors.WithLabelValues(ep.Network, ep.ExternalName, "rpc", "connectivity_failed").Inc()
+			}
+		}
 
 		// Record recovery metric
 		metrics.ExternalEndpointRecoveries.WithLabelValues(ep.Network, ep.Type, ep.ExternalName).Inc()

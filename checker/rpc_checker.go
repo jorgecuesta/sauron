@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"sauron/config"
 	"sauron/metrics"
 	"sauron/storage"
@@ -115,6 +117,18 @@ func (c *RPCChecker) CheckNode(ctx context.Context, node config.Node) error {
 	// Update storage
 	c.store.Update(node.Network, node.Name, "rpc", height, latency, "internal")
 
+	// Check WebSocket connectivity
+	wsAvailable := c.CheckWebSocketConnectivity(ctx, node)
+	c.store.UpdateWebSocketAvailability(node.Network, node.Name, "rpc", wsAvailable)
+
+	// Update WebSocket availability metric
+	if wsAvailable {
+		metrics.NodeWebSocketAvailable.WithLabelValues(node.Network, node.Name, "rpc").Set(1)
+	} else {
+		metrics.NodeWebSocketAvailable.WithLabelValues(node.Network, node.Name, "rpc").Set(0)
+		metrics.WebSocketCheckErrors.WithLabelValues(node.Network, node.Name, "rpc", "connectivity_failed").Inc()
+	}
+
 	// Update cache if enabled
 	if c.cache.IsEnabled() {
 		c.cache.SetHeight(ctx, node.Network, node.Name, "rpc", height, 30*time.Second)
@@ -132,6 +146,7 @@ func (c *RPCChecker) CheckNode(ctx context.Context, node config.Node) error {
 		zap.String("network", node.Network),
 		zap.Int64("height", height),
 		zap.Duration("latency", latency),
+		zap.Bool("websocket_available", wsAvailable),
 	)
 
 	return nil
@@ -152,4 +167,93 @@ func (c *RPCChecker) Close() {
 	if transport, ok := c.client.Transport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
 	}
+}
+
+// CheckWebSocketConnectivity tests if a node's WebSocket endpoint is working
+// Returns true if WebSocket is available and working
+func (c *RPCChecker) CheckWebSocketConnectivity(ctx context.Context, node config.Node) bool {
+	if node.RPC == "" {
+		return false
+	}
+
+	// Build WebSocket URL
+	wsURL := node.RPC
+	if len(wsURL) > 0 && wsURL[len(wsURL)-1] == '/' {
+		wsURL = wsURL[:len(wsURL)-1]
+	}
+
+	// Convert http(s):// to ws(s)://
+	if strings.HasPrefix(wsURL, "http://") {
+		wsURL = "ws://" + wsURL[7:]
+	} else if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + wsURL[8:]
+	} else if len(wsURL) > 0 && wsURL[0] != 'w' {
+		// Assume https if no protocol specified
+		wsURL = "wss://" + wsURL
+	}
+	wsURL += "/websocket"
+
+	// Create WebSocket dialer with timeout
+	dialer := websocket.DefaultDialer
+	dialer.HandshakeTimeout = 3 * time.Second
+
+	// Connect to WebSocket
+	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		c.logger.Debug("WebSocket connection failed",
+			zap.String("node", node.Name),
+			zap.String("network", node.Network),
+			zap.String("url", wsURL),
+			zap.Error(err),
+		)
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Set read deadline for response
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		c.logger.Debug("Failed to set read deadline",
+			zap.String("node", node.Name),
+			zap.String("network", node.Network),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	// Send a simple subscription test
+	subscribeMsg := []byte(`{"jsonrpc":"2.0","method":"subscribe","id":1,"params":{"query":"tm.event='NewBlock'"}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, subscribeMsg); err != nil {
+		c.logger.Debug("WebSocket write failed",
+			zap.String("node", node.Name),
+			zap.String("network", node.Network),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	// Try to read response
+	_, _, err = conn.ReadMessage()
+	if err != nil {
+		c.logger.Debug("WebSocket read failed",
+			zap.String("node", node.Name),
+			zap.String("network", node.Network),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	// Cleanup: unsubscribe and close gracefully
+	unsubscribeMsg := []byte(`{"jsonrpc":"2.0","method":"unsubscribe","id":2,"params":{"query":"tm.event='NewBlock'"}}`)
+	_ = conn.WriteMessage(websocket.TextMessage, unsubscribeMsg)
+
+	// Send close frame
+	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+
+	c.logger.Debug("WebSocket check successful",
+		zap.String("node", node.Name),
+		zap.String("network", node.Network),
+		zap.String("url", wsURL),
+	)
+
+	return true
 }

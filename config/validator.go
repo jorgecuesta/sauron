@@ -57,17 +57,19 @@ func Validate(cfg *Config) error {
 		}
 	}
 
-	// Validate internal nodes
-	if len(cfg.Internals) == 0 {
-		return fmt.Errorf("at least one internal node must be configured")
+	// Validate that at least one internal node OR external ring is configured
+	if len(cfg.Internals) == 0 && len(cfg.Externals) == 0 {
+		return fmt.Errorf("at least one internal node or external ring must be configured")
 	}
+
+	// Validate internal nodes (if any)
 	for i, node := range cfg.Internals {
 		if err := validateNode(&node, i); err != nil {
 			return err
 		}
 	}
 
-	// Validate external rings
+	// Validate external rings (if any)
 	for i, ext := range cfg.Externals {
 		if err := validateExternal(&ext, i); err != nil {
 			return err

@@ -86,10 +86,11 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 			// Use URL as the identifier (prefixed with "ext:" to distinguish from internal nodes)
 			nodeName := "ext:" + ep.URL
 			nodeMetrics := &storage.NodeMetrics{
-				Height:     ep.Height,
-				AvgLatency: ep.Latency,
-				Timestamp:  ep.LastValidated,
-				Source:     "external",
+				Height:             ep.Height,
+				AvgLatency:         ep.Latency,
+				Timestamp:          ep.LastValidated,
+				Source:             "external",
+				WebSocketAvailable: ep.WebSocketAvailable,
 			}
 			nodes = append(nodes, nodeWithName{name: nodeName, metrics: nodeMetrics})
 

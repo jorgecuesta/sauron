@@ -215,11 +215,18 @@ func (s *Scheduler) checkExternalRings() {
 	}
 }
 
-// getAllNetworks returns a list of all networks from internal nodes
+// getAllNetworks returns a list of all networks from internal nodes and config.Networks
 func (s *Scheduler) getAllNetworks(cfg *config.Config) []string {
 	networksMap := make(map[string]bool)
+
+	// Get networks from internal nodes
 	for _, node := range cfg.Internals {
 		networksMap[node.Network] = true
+	}
+
+	// Also get networks from the main config (so externals-only configs work)
+	for _, network := range cfg.Networks {
+		networksMap[network.Name] = true
 	}
 
 	networks := make([]string, 0, len(networksMap))
