@@ -62,49 +62,75 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		zap.Int("count", len(nodes)),
 	)
 
-	// Check if we have any healthy internal nodes (height > 0)
-	hasHealthyInternals := false
+	// Find max internal height
+	var maxInternalHeight int64
 	for _, node := range nodes {
-		if node.metrics.Height > 0 {
-			hasHealthyInternals = true
-			break
+		if node.metrics.Height > maxInternalHeight {
+			maxInternalHeight = node.metrics.Height
 		}
 	}
 
-	// FAILOVER ONLY: Add external endpoints ONLY if no healthy internal nodes exist
-	// This ensures each deployment uses its own resources first
-	if !hasHealthyInternals && s.endpointStore != nil {
+	// Get external endpoints and check if we should include them
+	// Externals are added when: no healthy internals OR externals are ahead by threshold
+	if s.endpointStore != nil {
 		externalEndpoints := s.endpointStore.GetValidatedEndpoints(network, endpointType)
-		s.logger.Info("Selector: no healthy internal nodes, falling back to external endpoints",
-			zap.String("network", network),
-			zap.String("type", endpointType),
-			zap.Int("external_count", len(externalEndpoints)),
-		)
 
+		// Get threshold from config (default to 2 blocks)
+		cfg := s.configLoader.Get()
+		threshold := cfg.ExternalFailoverThreshold
+		if threshold == 0 {
+			threshold = 2 // default threshold
+		}
+
+		// Find max external height
+		var maxExternalHeight int64
 		for _, ep := range externalEndpoints {
-			// Create a synthetic "node" entry for this external endpoint
-			// Use URL as the identifier (prefixed with "ext:" to distinguish from internal nodes)
-			nodeName := "ext:" + ep.URL
-			nodeMetrics := &storage.NodeMetrics{
-				Height:             ep.Height,
-				AvgLatency:         ep.Latency,
-				Timestamp:          ep.LastValidated,
-				Source:             "external",
-				WebSocketAvailable: ep.WebSocketAvailable,
+			if ep.Height > maxExternalHeight {
+				maxExternalHeight = ep.Height
 			}
-			nodes = append(nodes, nodeWithName{name: nodeName, metrics: nodeMetrics})
+		}
 
-			s.logger.Debug("Selector: added external endpoint to candidates",
-				zap.String("url", ep.URL),
-				zap.Int64("height", ep.Height),
-				zap.Duration("latency", ep.Latency),
+		// Add externals if: no healthy internals OR externals are significantly ahead
+		shouldAddExternals := maxInternalHeight == 0 || maxExternalHeight > maxInternalHeight+threshold
+
+		if shouldAddExternals && len(externalEndpoints) > 0 {
+			s.logger.Info("Selector: adding external endpoints to candidates",
+				zap.String("network", network),
+				zap.String("type", endpointType),
+				zap.Int("external_count", len(externalEndpoints)),
+				zap.Int64("max_internal_height", maxInternalHeight),
+				zap.Int64("max_external_height", maxExternalHeight),
+				zap.Int64("threshold", threshold),
+			)
+
+			for _, ep := range externalEndpoints {
+				// Create a synthetic "node" entry for this external endpoint
+				// Use URL as the identifier (prefixed with "ext:" to distinguish from internal nodes)
+				nodeName := "ext:" + ep.URL
+				nodeMetrics := &storage.NodeMetrics{
+					Height:             ep.Height,
+					AvgLatency:         ep.Latency,
+					Timestamp:          ep.LastValidated,
+					Source:             "external",
+					WebSocketAvailable: ep.WebSocketAvailable,
+				}
+				nodes = append(nodes, nodeWithName{name: nodeName, metrics: nodeMetrics})
+
+				s.logger.Debug("Selector: added external endpoint to candidates",
+					zap.String("url", ep.URL),
+					zap.Int64("height", ep.Height),
+					zap.Duration("latency", ep.Latency),
+				)
+			}
+		} else {
+			s.logger.Debug("Selector: using internal nodes only",
+				zap.String("network", network),
+				zap.String("type", endpointType),
+				zap.Int64("max_internal_height", maxInternalHeight),
+				zap.Int64("max_external_height", maxExternalHeight),
+				zap.Int64("threshold", threshold),
 			)
 		}
-	} else if hasHealthyInternals {
-		s.logger.Debug("Selector: using internal nodes only (healthy internals available)",
-			zap.String("network", network),
-			zap.String("type", endpointType),
-		)
 	}
 
 	if len(nodes) == 0 {

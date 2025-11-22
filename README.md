@@ -114,6 +114,8 @@ Sauron will automatically route all requests to the best available node.
 2. Among nodes at max height, select the one with lowest latency
 3. Instant failover if the selected node fails
 
+**External Failover:** External nodes from other Sauron deployments are only used when internal nodes fall behind by more than `external_failover_threshold` blocks (default: 2). This prevents overloading external nodes while ensuring failover when needed.
+
 **Health Checks (every 5 seconds):**
 - API: `GET /cosmos/base/tendermint/v1beta1/blocks/latest`
 - RPC: `GET /status`
@@ -162,6 +164,7 @@ make docker-down
 
 ```bash
 make build    # Build binary
+make test     # Run unit tests
 make fmt      # Format code
 make lint     # Run linters
 make clean    # Clean build artifacts

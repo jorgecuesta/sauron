@@ -8,18 +8,19 @@ import (
 // Config represents the complete Sauron configuration
 // The Dark Tower's ancient scrolls
 type Config struct {
-	API       bool       `mapstructure:"api"`
-	RPC       bool       `mapstructure:"rpc"`
-	GRPC      bool       `mapstructure:"grpc"`
-	Auth      bool       `mapstructure:"auth"`
-	Listen    string     `mapstructure:"listen"`
-	Timeouts  Timeouts   `mapstructure:"timeouts"`
-	Redis     Redis      `mapstructure:"redis"`
-	RateLimit RateLimit  `mapstructure:"rate_limit"`
-	Networks  []Network  `mapstructure:"networks"`
-	Internals []Node     `mapstructure:"internals"`
-	Externals []External `mapstructure:"externals"`
-	Users     []User     `mapstructure:"users"`
+	API                       bool       `mapstructure:"api"`
+	RPC                       bool       `mapstructure:"rpc"`
+	GRPC                      bool       `mapstructure:"grpc"`
+	Auth                      bool       `mapstructure:"auth"`
+	Listen                    string     `mapstructure:"listen"`
+	ExternalFailoverThreshold int64      `mapstructure:"external_failover_threshold"` // Blocks behind before using externals (default: 2)
+	Timeouts                  Timeouts   `mapstructure:"timeouts"`
+	Redis                     Redis      `mapstructure:"redis"`
+	RateLimit                 RateLimit  `mapstructure:"rate_limit"`
+	Networks                  []Network  `mapstructure:"networks"`
+	Internals                 []Node     `mapstructure:"internals"`
+	Externals                 []External `mapstructure:"externals"`
+	Users                     []User     `mapstructure:"users"`
 }
 
 // Timeouts configuration for health checks and proxying

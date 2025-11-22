@@ -12,6 +12,12 @@ auth: true
 # Status API listen address (for /health, /ready, /metrics, /{network}/status)
 listen: ":3000"
 
+# External failover threshold: number of blocks internals must be behind
+# before external endpoints are added to the candidate pool.
+# This prevents overloading external nodes when internals are healthy.
+# Default: 2 (externals added when they're 3+ blocks ahead of internals)
+external_failover_threshold: 2
+
 # Timeouts for health checks and proxying
 timeouts:
   health_check: 5s  # How often to check node health

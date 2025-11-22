@@ -46,11 +46,17 @@ External endpoints go through states: `ADVERTISED → VALIDATED → [WORKING|FAI
 
 ### 3. Selector (`selector/`)
 Chooses the best endpoint using this algorithm:
-1. **Find max height** among all candidates (internal + external)
-2. **Filter** to only nodes at max height
-3. **Select lowest latency** among filtered nodes
+1. **Check internal heights** - find max height among internal nodes
+2. **Threshold check** - add externals only if they're ahead by more than `external_failover_threshold` blocks
+3. **Find max height** among all candidates (internal + external if threshold exceeded)
+4. **Filter** to only nodes at max height
+5. **Select lowest latency** among filtered nodes
 
-External endpoints compete equally with internal nodes.
+**External Failover Policy:** External endpoints are only added to the candidate pool when:
+- All internal nodes have height 0 (completely failed), OR
+- External max height > internal max height + threshold (default: 2)
+
+This prevents overloading external nodes when internals are healthy and only slightly behind.
 
 ### 4. Proxies (`proxy/`)
 - **HTTP Proxy**: Handles API (port 8080) and RPC (port 8081) requests
@@ -101,10 +107,18 @@ External endpoints from other Sauron rings are:
 - Discovered via `/status` API
 - Validated for connectivity
 - Tracked in separate store
-- Added to selector candidate pool with `ext:` prefix
+- Added to selector candidate pool with `ext:` prefix (only when threshold exceeded)
 - Selected using same height→latency algorithm as internal nodes
 
-This enables distributed failover across multiple Sauron deployments.
+**Threshold-Based Failover:** External endpoints are only added to the candidate pool when internals are significantly behind. This ensures fair resource usage and prevents overloading external deployments.
+
+| Internal Height | External Height | Threshold | Result |
+|----------------|-----------------|-----------|--------|
+| 100 | 102 | 2 | Use internal only (102 > 100+2 = false) |
+| 100 | 103 | 2 | Add externals (103 > 100+2 = true) |
+| 0 | 100 | 2 | Add externals (no healthy internal) |
+
+This enables distributed failover across multiple Sauron deployments while respecting resource boundaries.
 
 ## Configuration
 
@@ -118,6 +132,10 @@ listen: ":3000"
 api: true
 rpc: true
 grpc: true
+
+# External failover threshold (default: 2)
+# Externals added when they're 3+ blocks ahead of internals
+external_failover_threshold: 2
 
 # Timeouts
 timeouts:

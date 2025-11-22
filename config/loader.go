@@ -93,14 +93,15 @@ func (l *Loader) Get() *Config {
 
 	// Deep copy to prevent external modifications to slices
 	cfg := Config{
-		API:       l.config.API,
-		RPC:       l.config.RPC,
-		GRPC:      l.config.GRPC,
-		Auth:      l.config.Auth,
-		Listen:    l.config.Listen,
-		Timeouts:  l.config.Timeouts,
-		Redis:     l.config.Redis,
-		RateLimit: l.config.RateLimit,
+		API:                       l.config.API,
+		RPC:                       l.config.RPC,
+		GRPC:                      l.config.GRPC,
+		Auth:                      l.config.Auth,
+		Listen:                    l.config.Listen,
+		ExternalFailoverThreshold: l.config.ExternalFailoverThreshold,
+		Timeouts:                  l.config.Timeouts,
+		Redis:                     l.config.Redis,
+		RateLimit:                 l.config.RateLimit,
 		// Deep copy slices
 		Networks:  make([]Network, len(l.config.Networks)),
 		Internals: make([]Node, len(l.config.Internals)),

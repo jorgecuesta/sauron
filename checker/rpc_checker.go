@@ -10,10 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"sauron/config"
 	"sauron/metrics"
 	"sauron/storage"
+
+	"github.com/gorilla/websocket"
 
 	"go.uber.org/zap"
 )
