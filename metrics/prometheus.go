@@ -92,7 +92,7 @@ var (
 			Name: "sauron_routing_selections_total",
 			Help: "Total number of routing selections by node and reason",
 		},
-		[]string{"network", "type", "selected_node", "reason"}, // reason: height_winner|latency_tiebreaker|only_available
+		[]string{"network", "type", "selected_node", "reason"}, // reason: height_winner|round_robin|only_available
 	)
 
 	// RoutingFailures tracks when routing fails

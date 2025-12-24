@@ -1,7 +1,7 @@
 package selector
 
 import (
-	"math"
+	"sync/atomic"
 	"time"
 
 	"sauron/config"
@@ -12,18 +12,19 @@ import (
 )
 
 // Selector chooses the best node for a given network and endpoint type
-// The Dark Lord's judgment - highest height → lowest latency
+// The Dark Lord's judgment - highest height → round-robin distribution
 type Selector struct {
 	store         *storage.HeightStore
 	endpointStore *storage.ExternalEndpointStore
 	configLoader  *config.Loader
 	logger        *zap.Logger
+	rrCounter     uint64 // Round-robin counter for load distribution
 }
 
 // SelectionDecision tracks why a node was selected
 type SelectionDecision struct {
 	SelectedNode    string
-	Reason          string // "height_winner", "latency_tiebreaker", "only_available", "external_endpoint"
+	Reason          string // "height_winner", "round_robin", "only_available", "external_endpoint"
 	Candidates      int
 	MaxHeight       int64
 	SelectedLatency time.Duration
@@ -194,16 +195,11 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		}
 	}
 
-	// Step 3: Among nodes with max height, select the one with lowest latency
-	var bestNode nodeWithName
-	minLatency := time.Duration(math.MaxInt64)
-
-	for _, node := range maxHeightNodes {
-		if node.metrics.AvgLatency < minLatency {
-			minLatency = node.metrics.AvgLatency
-			bestNode = node
-		}
-	}
+	// Step 3: Among nodes with max height, distribute using round-robin
+	// Increment counter atomically and select node by index
+	counter := atomic.AddUint64(&s.rrCounter, 1)
+	selectedIndex := int(counter % uint64(len(maxHeightNodes)))
+	bestNode := maxHeightNodes[selectedIndex]
 
 	// Determine selection reason
 	if len(nodes) == 1 {
@@ -211,7 +207,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	} else if len(maxHeightNodes) == 1 {
 		decision.Reason = "height_winner"
 	} else {
-		decision.Reason = "latency_tiebreaker"
+		decision.Reason = "round_robin"
 	}
 
 	decision.SelectedNode = bestNode.name
@@ -232,7 +228,8 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		zap.String("reason", decision.Reason),
 		zap.Int("candidates", decision.Candidates),
 		zap.Int64("height", maxHeight),
-		zap.Duration("latency", minLatency),
+		zap.Duration("latency", bestNode.metrics.AvgLatency),
+		zap.Int("max_height_nodes", len(maxHeightNodes)),
 	)
 
 	return bestNode.metrics, bestNode.name, decision

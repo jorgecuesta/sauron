@@ -1,6 +1,6 @@
 # How Sauron Works
 
-Sauron is an intelligent routing proxy for Pocket Network nodes that selects the best available endpoint based on height and latency.
+Sauron is an intelligent routing proxy for Pocket Network nodes that selects the best available endpoint based on height with round-robin load distribution.
 
 ## Architecture
 
@@ -14,8 +14,8 @@ Sauron is an intelligent routing proxy for Pocket Network nodes that selects the
                                ▼
                         ┌─────────────┐
                         │  Selector   │
-                        │ (Height →   │
-                        │  Latency)   │
+                        │  (Height +  │
+                        │ Round-Robin)│
                         └─────────────┘
                                │
                     ┌──────────┴──────────┐
@@ -50,7 +50,7 @@ Chooses the best endpoint using this algorithm:
 2. **Threshold check** - add externals only if they're ahead by more than `external_failover_threshold` blocks
 3. **Find max height** among all candidates (internal + external if threshold exceeded)
 4. **Filter** to only nodes at max height
-5. **Select lowest latency** among filtered nodes
+5. **Distribute requests** among filtered nodes using round-robin
 
 **External Failover Policy:** External endpoints are only added to the candidate pool when:
 - All internal nodes have height 0 (completely failed), OR
@@ -85,7 +85,7 @@ Prometheus metrics for monitoring:
 1. Client sends request to Sauron proxy port
 2. Proxy calls Selector with (network, endpoint_type)
 3. Selector evaluates all candidates (internal + external)
-4. Selector returns best endpoint based on height→latency
+4. Selector returns endpoint based on height with round-robin distribution
 5. Proxy forwards request to selected backend
 6. Response returned to client
 7. Metrics recorded
@@ -108,7 +108,7 @@ External endpoints from other Sauron rings are:
 - Validated for connectivity
 - Tracked in separate store
 - Added to selector candidate pool with `ext:` prefix (only when threshold exceeded)
-- Selected using same height→latency algorithm as internal nodes
+- Selected using same height-based round-robin algorithm as internal nodes
 
 **Threshold-Based Failover:** External endpoints are only added to the candidate pool when internals are significantly behind. This ensures fair resource usage and prevents overloading external deployments.
 
@@ -458,7 +458,7 @@ readinessProbe:
 **Common causes:**
 - Node actually has lower height than expected
 - Node health checks failing
-- Higher latency than alternative nodes
+- Round-robin distribution selecting different nodes
 
 ### External Endpoint Discovery
 

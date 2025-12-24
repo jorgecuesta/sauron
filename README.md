@@ -111,7 +111,7 @@ Sauron will automatically route all requests to the best available node.
 
 **Selection Algorithm:**
 1. Find the highest block height across all nodes
-2. Among nodes at max height, select the one with lowest latency
+2. Among nodes at max height, distribute requests using round-robin
 3. Instant failover if the selected node fails
 
 **External Failover:** External nodes from other Sauron deployments are only used when internal nodes fall behind by more than `external_failover_threshold` blocks (default: 2). This prevents overloading external nodes while ensuring failover when needed.
@@ -126,7 +126,7 @@ Sauron will automatically route all requests to the best available node.
 ## Features
 
 - ✅ **Height-based routing**: Always use the node with the highest block height
-- ✅ **Latency optimization**: Among nodes at max height, pick the fastest
+- ✅ **Load distribution**: Among nodes at max height, distribute requests evenly using round-robin
 - ✅ **Multi-protocol**: API (HTTP), RPC (HTTP), gRPC support
 - ✅ **External discovery**: Query other Sauron deployments for additional endpoints
 - ✅ **Hot reload**: Update configuration without restart (SIGHUP)
