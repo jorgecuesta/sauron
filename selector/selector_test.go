@@ -229,7 +229,7 @@ func TestSelectorExternalsAddedWhenNoHealthyInternals(t *testing.T) {
 }
 
 // TestSelectorLatencyTiebreakerSameHeight tests that when multiple nodes have
-// the same height, the one with lowest latency is selected
+// the same height, round-robin distribution is used
 func TestSelectorLatencyTiebreakerSameHeight(t *testing.T) {
 	logger := zap.NewNop()
 	heightStore := storage.NewHeightStore()
@@ -238,7 +238,7 @@ func TestSelectorLatencyTiebreakerSameHeight(t *testing.T) {
 
 	// Setup internal nodes at same height with different latencies
 	heightStore.Update("pocket", "node-1", "api", 100, 100*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 20*time.Millisecond, "internal") // lowest latency
+	heightStore.Update("pocket", "node-2", "api", 100, 20*time.Millisecond, "internal")
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
@@ -248,13 +248,13 @@ func TestSelectorLatencyTiebreakerSameHeight(t *testing.T) {
 		t.Fatal("Expected metrics to be returned")
 	}
 
-	// Should select node-2 (lowest latency)
-	if nodeName != "node-2" {
-		t.Errorf("Expected node-2 to be selected (lowest latency), got %s", nodeName)
+	// Should select one of the nodes via round-robin
+	if nodeName != "node-1" && nodeName != "node-2" {
+		t.Errorf("Expected node-1 or node-2 to be selected, got %s", nodeName)
 	}
 
-	if decision.Reason != "latency_tiebreaker" {
-		t.Errorf("Expected reason 'latency_tiebreaker', got %s", decision.Reason)
+	if decision.Reason != "round_robin" {
+		t.Errorf("Expected reason 'round_robin', got %s", decision.Reason)
 	}
 }
 
@@ -378,7 +378,7 @@ func TestSelectorMultipleExternals(t *testing.T) {
 	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 105, 100*time.Millisecond)
 
 	endpointStore.StoreAdvertised("external-2", "https://ring2.example.com", "pocket", "api", "https://ext2.example.com")
-	endpointStore.MarkValidated("external-2", "https://ring2.example.com", "pocket", "api", "https://ext2.example.com", 105, 30*time.Millisecond) // same height, lower latency
+	endpointStore.MarkValidated("external-2", "https://ring2.example.com", "pocket", "api", "https://ext2.example.com", 105, 30*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
@@ -388,10 +388,13 @@ func TestSelectorMultipleExternals(t *testing.T) {
 		t.Fatal("Expected metrics to be returned")
 	}
 
-	// Should select ext2 (same height as ext1, but lower latency)
-	expectedName := "ext:https://ext2.example.com"
-	if nodeName != expectedName {
-		t.Errorf("Expected %s (lowest latency among max height), got %s", expectedName, nodeName)
+	// Should select one of the externals via round-robin (both at max height 105)
+	if nodeName != "ext:https://ext1.example.com" && nodeName != "ext:https://ext2.example.com" {
+		t.Errorf("Expected ext1 or ext2 to be selected, got %s", nodeName)
+	}
+
+	if metrics.Height != 105 {
+		t.Errorf("Expected height 105, got %d", metrics.Height)
 	}
 
 	// 3 candidates (1 internal + 2 externals)
