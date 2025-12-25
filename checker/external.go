@@ -346,9 +346,11 @@ func (c *ExternalChecker) validateWebSocketEndpoint(ctx context.Context, url str
 	}
 	wsURL += "/websocket"
 
-	// Create WebSocket dialer with timeout
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 3 * time.Second
+	// Create isolated WebSocket dialer with timeout (avoid race on DefaultDialer)
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 3 * time.Second,
+		Proxy:            websocket.DefaultDialer.Proxy,
+	}
 
 	// Connect to WebSocket
 	conn, _, err := dialer.DialContext(ctx, wsURL, nil)

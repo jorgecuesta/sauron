@@ -69,8 +69,8 @@ func (s *Scheduler) Start() error {
 	cfg := s.configLoader.Get()
 	s.timeout = cfg.Timeouts.HealthCheck
 
-	// Schedule internal node checks every 5 seconds
-	_, err := s.cron.AddFunc("*/5 * * * * *", func() {
+	// Schedule internal node checks every 30 seconds (aligned with block time)
+	_, err := s.cron.AddFunc("*/30 * * * * *", func() {
 		s.checkInternalNodes()
 	})
 	if err != nil {

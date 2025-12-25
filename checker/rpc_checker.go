@@ -194,9 +194,11 @@ func (c *RPCChecker) CheckWebSocketConnectivity(ctx context.Context, node config
 	}
 	wsURL += "/websocket"
 
-	// Create WebSocket dialer with timeout
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 3 * time.Second
+	// Create isolated WebSocket dialer with timeout (avoid race on DefaultDialer)
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 3 * time.Second,
+		Proxy:            websocket.DefaultDialer.Proxy,
+	}
 
 	// Connect to WebSocket
 	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
@@ -247,8 +249,14 @@ func (c *RPCChecker) CheckWebSocketConnectivity(ctx context.Context, node config
 	unsubscribeMsg := []byte(`{"jsonrpc":"2.0","method":"unsubscribe","id":2,"params":{"query":"tm.event='NewBlock'"}}`)
 	_ = conn.WriteMessage(websocket.TextMessage, unsubscribeMsg)
 
-	// Send close frame
-	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	// Send close frame and wait for server response
+	closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+	if err := conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second)); err != nil {
+		c.logger.Debug("Failed to send close message", zap.Error(err))
+	}
+
+	// Wait briefly for server close response before defer closes connection
+	time.Sleep(100 * time.Millisecond)
 
 	c.logger.Debug("WebSocket check successful",
 		zap.String("node", node.Name),
