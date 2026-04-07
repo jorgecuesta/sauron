@@ -2,15 +2,15 @@ package checker
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"sauron/config"
+	"sauron/internal/grpcutil"
+	"sauron/internal/urlutil"
 	"sauron/metrics"
 	"sauron/storage"
 
@@ -18,9 +18,6 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 )
 
 // ExternalChecker queries other Sauron deployments (the Palantíri network)
@@ -85,11 +82,7 @@ func (c *ExternalChecker) CheckExternal(ctx context.Context, external config.Ext
 
 func (c *ExternalChecker) queryRing(ctx context.Context, external config.External, ringURL, network string) error {
 	// Build URL: {ring}/{network}/status
-	url := ringURL
-	if len(url) > 0 && url[len(url)-1] == '/' {
-		url = url[:len(url)-1]
-	}
-	url = fmt.Sprintf("%s/%s/status", url, network)
+	url := fmt.Sprintf("%s/%s/status", urlutil.TrimTrailingSlash(ringURL), network)
 
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -346,43 +339,11 @@ func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc
 
 // createGRPCConnection dials gRPC and warms up the connection.
 func (c *ExternalChecker) createGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
-	var opts []grpc.DialOption
-
-	if useInsecure {
-		opts = []grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                10 * time.Second,
-				Timeout:             3 * time.Second,
-				PermitWithoutStream: true,
-			}),
-			grpc.WithConnectParams(grpc.ConnectParams{
-				MinConnectTimeout: 10 * time.Second,
-			}),
-		}
-	} else {
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-		creds := credentials.NewTLS(tlsConfig)
-		opts = []grpc.DialOption{
-			grpc.WithTransportCredentials(creds),
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                10 * time.Second,
-				Timeout:             3 * time.Second,
-				PermitWithoutStream: true,
-			}),
-			grpc.WithConnectParams(grpc.ConnectParams{
-				MinConnectTimeout: 10 * time.Second,
-			}),
-		}
-	}
-
-	// Use passthrough:/// resolver to avoid DNS resolver IPv6 timeout issues
-	target := url
-	if !strings.HasPrefix(target, "passthrough://") && !strings.HasPrefix(target, "dns://") {
-		target = "passthrough:///" + target
-	}
-
-	conn, err := grpc.NewClient(target, opts...)
+	conn, err := grpcutil.NewConnection(url, useInsecure,
+		grpc.WithConnectParams(grpc.ConnectParams{
+			MinConnectTimeout: 10 * time.Second,
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}

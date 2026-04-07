@@ -2,12 +2,11 @@ package checker
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"strings"
 	"time"
 
 	"sauron/config"
+	"sauron/internal/grpcutil"
 	"sauron/metrics"
 	"sauron/storage"
 
@@ -15,9 +14,6 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	grpcinsecure "google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 )
 
 // GRPCChecker checks node heights via CosmosSDK gRPC
@@ -104,36 +100,15 @@ func (c *GRPCChecker) getConnection(node config.Node) (*grpc.ClientConn, error) 
 
 // createConnection dials gRPC and warms up the connection.
 func (c *GRPCChecker) createConnection(node config.Node) (*grpc.ClientConn, error) {
-	var opts []grpc.DialOption
-	if node.GRPCInsecure {
-		opts = append(opts, grpc.WithTransportCredentials(grpcinsecure.NewCredentials()))
-	} else {
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-	}
-
-	opts = append(opts,
+	conn, err := grpcutil.NewConnection(node.GRPC, node.GRPCInsecure,
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(100*1024*1024),
 			grpc.MaxCallSendMsgSize(100*1024*1024),
 		),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second,
-			Timeout:             3 * time.Second,
-			PermitWithoutStream: true,
-		}),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			MinConnectTimeout: 10 * time.Second,
 		}),
 	)
-
-	// Use passthrough:/// resolver to avoid DNS resolver IPv6 timeout issues
-	target := node.GRPC
-	if !strings.HasPrefix(target, "passthrough://") && !strings.HasPrefix(target, "dns://") {
-		target = "passthrough:///" + target
-	}
-
-	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, err
 	}

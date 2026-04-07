@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"sauron/config"
+	"sauron/internal/urlutil"
 	"sauron/metrics"
 	"sauron/storage"
 
@@ -256,9 +257,9 @@ func (s *Selector) GetEndpointURL(nodeName, endpointType string) string {
 		if node.Name == nodeName {
 			switch endpointType {
 			case "api":
-				return normalizeURL(node.API)
+				return urlutil.NormalizeURL(node.API)
 			case "rpc":
-				return normalizeURL(node.RPC)
+				return urlutil.NormalizeURL(node.RPC)
 			case "grpc":
 				return node.GRPC // gRPC doesn't need normalization
 			}
@@ -278,17 +279,6 @@ func (s *Selector) GetEndpointURL(nodeName, endpointType string) string {
 	)
 
 	return ""
-}
-
-// normalizeURL ensures URL has proper scheme
-func normalizeURL(url string) string {
-	if url == "" {
-		return ""
-	}
-	if len(url) > 0 && url[0] != 'h' {
-		return "https://" + url
-	}
-	return url
 }
 
 // GetHighestHeights returns the highest height for each enabled endpoint type

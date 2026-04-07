@@ -56,15 +56,6 @@ var (
 		[]string{"network", "node", "type", "error_type"},
 	)
 
-	// NodeHeightStaleness tracks time since last height update
-	NodeHeightStaleness = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_node_height_staleness_seconds",
-			Help: "Seconds since last successful height update",
-		},
-		[]string{"network", "node", "type"},
-	)
-
 	// HeightCheckDuration tracks how long height checks take
 	HeightCheckDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -92,7 +83,7 @@ var (
 			Name: "sauron_routing_selections_total",
 			Help: "Total number of routing selections by node and reason",
 		},
-		[]string{"network", "type", "selected_node", "reason"}, // reason: height_winner|round_robin|only_available
+		[]string{"network", "type", "node_source", "reason"}, // node_source: internal|external; reason: height_winner|round_robin|only_available
 	)
 
 	// RoutingFailures tracks when routing fails
@@ -163,25 +154,7 @@ var (
 		[]string{"network", "node", "type", "status_code", "error_type"},
 	)
 
-	// ProxyActiveConnections tracks active proxy connections
-	ProxyActiveConnections = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_proxy_active_connections",
-			Help: "Number of active proxy connections",
-		},
-		[]string{"network", "node", "type"},
-	)
-
 	// User Analytics
-
-	// UserRequests tracks requests per user
-	UserRequests = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "sauron_user_requests_total",
-			Help: "Total number of requests per user",
-		},
-		[]string{"user", "network", "type", "method"},
-	)
 
 	// AuthFailures tracks authentication failures
 	AuthFailures = promauto.NewCounterVec(
@@ -202,15 +175,6 @@ var (
 			Buckets: []float64{.01, .05, .1, .25, .5, 1, 2, 5},
 		},
 		[]string{"ring_name", "ring_url"},
-	)
-
-	// ExternalHeightDelta tracks height difference between external and internal
-	ExternalHeightDelta = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_external_height_delta",
-			Help: "Height difference between external rings and internal nodes",
-		},
-		[]string{"network", "ring_name", "type"},
 	)
 
 	// ExternalRingAvailable indicates if an external ring is reachable
@@ -304,110 +268,5 @@ var (
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2},
 		},
 		[]string{"network", "type", "ring_name"},
-	)
-
-	// Cache Performance
-
-	// CacheOperations tracks cache hits/misses
-	CacheOperations = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "sauron_cache_operations_total",
-			Help: "Total number of cache operations",
-		},
-		[]string{"operation", "result"}, // operation: get|set|delete, result: hit|miss|error
-	)
-
-	// CacheOperationDuration tracks cache operation latency
-	CacheOperationDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "sauron_cache_operation_duration_seconds",
-			Help:    "Duration of cache operations",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5},
-		},
-		[]string{"operation"},
-	)
-
-	// System Health Metrics
-
-	// WorkerPoolActive tracks active workers
-	WorkerPoolActive = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "sauron_worker_pool_active_workers",
-			Help: "Number of active workers in the pool",
-		},
-	)
-
-	// WorkerPoolQueueDepth tracks queued tasks
-	WorkerPoolQueueDepth = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "sauron_worker_pool_queue_depth",
-			Help: "Number of tasks waiting in the worker pool queue",
-		},
-	)
-
-	// WorkerTaskDuration tracks task execution time
-	WorkerTaskDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "sauron_worker_task_duration_seconds",
-			Help:    "Duration of worker task execution",
-			Buckets: []float64{.1, .25, .5, 1, 2, 5, 10},
-		},
-		[]string{"task_type"},
-	)
-
-	// ConfigReloads tracks configuration reload events
-	ConfigReloads = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "sauron_config_reloads_total",
-			Help: "Total number of configuration reload attempts",
-		},
-		[]string{"result"}, // result: success|failure
-	)
-
-	// KEDA Autoscaling Metrics
-
-	// KEDARequestRate tracks request rate per second for autoscaling
-	KEDARequestRate = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_keda_request_rate_per_second",
-			Help: "Request rate per second for KEDA autoscaling",
-		},
-		[]string{"network", "type"},
-	)
-
-	// KEDALatencyP95 tracks 95th percentile latency
-	KEDALatencyP95 = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_keda_latency_p95_seconds",
-			Help: "95th percentile latency for KEDA autoscaling",
-		},
-		[]string{"network", "type"},
-	)
-
-	// KEDALatencyP99 tracks 99th percentile latency
-	KEDALatencyP99 = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_keda_latency_p99_seconds",
-			Help: "99th percentile latency for KEDA autoscaling",
-		},
-		[]string{"network", "type"},
-	)
-
-	// KEDAErrorRate tracks error rate percentage
-	KEDAErrorRate = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_keda_error_rate_percent",
-			Help: "Error rate percentage for KEDA autoscaling",
-		},
-		[]string{"network", "type"},
-	)
-
-	// KEDAConnectionUtilization tracks connection pool utilization
-	KEDAConnectionUtilization = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sauron_keda_connection_utilization_percent",
-			Help: "Connection pool utilization percentage for KEDA autoscaling",
-		},
-		[]string{"type"},
 	)
 )

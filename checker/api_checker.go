@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"sauron/config"
+	"sauron/internal/urlutil"
 	"sauron/metrics"
 	"sauron/storage"
 
@@ -56,14 +57,7 @@ func (c *APIChecker) CheckNode(ctx context.Context, node config.Node) error {
 	}
 
 	// Build URL
-	url := node.API
-	if len(url) > 0 && url[len(url)-1] == '/' {
-		url = url[:len(url)-1]
-	}
-	if len(url) > 0 && url[0] != 'h' {
-		url = "https://" + url
-	}
-	url += "/cosmos/base/tendermint/v1beta1/blocks/latest"
+	url := urlutil.NormalizeURL(node.API) + "/cosmos/base/tendermint/v1beta1/blocks/latest"
 
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)

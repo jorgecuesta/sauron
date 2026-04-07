@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"sauron/config"
+	"sauron/internal/grpcutil"
 	"sauron/metrics"
 	"sauron/selector"
 	"sauron/storage"
@@ -17,10 +17,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -155,19 +152,6 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 		delete(p.connPool, targetAddr)
 	}
 
-	// Create new connection with optimized settings
-	var opts []grpc.DialOption
-	if useInsecure {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	} else {
-		// Use TLS credentials with system cert pool
-		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-		creds := credentials.NewTLS(tlsConfig)
-		opts = append(opts, grpc.WithTransportCredentials(creds))
-	}
-
 	// Get network config for message size limits
 	cfg := p.configLoader.Get()
 	var maxRecvSize, maxSendSize int
@@ -187,28 +171,13 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 		maxSendSize = 100 * 1024 * 1024
 	}
 
-	// Optimization settings
-	opts = append(opts,
+	conn, err := grpcutil.NewConnection(targetAddr, useInsecure,
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(maxRecvSize), // Use configured limit for backend connections
 			grpc.MaxCallSendMsgSize(maxSendSize), // Use configured limit for backend connections
 			grpc.ForceCodec(&rawCodec{}),         // Use raw codec for transparent proxying
 		),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second, // Send keepalive pings every 10 seconds
-			Timeout:             3 * time.Second,  // Wait 3 seconds for ping ack
-			PermitWithoutStream: true,             // Allow pings even with no active streams
-		}),
 	)
-
-	// Use passthrough:/// resolver to avoid DNS resolver IPv6 timeout issues with Cloudflare
-	target := targetAddr
-	if !strings.HasPrefix(target, "passthrough://") && !strings.HasPrefix(target, "dns://") {
-		target = "passthrough:///" + target
-	}
-
-	// Create connection using grpc.NewClient (replaces deprecated DialContext)
-	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, err
 	}

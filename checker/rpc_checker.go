@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"sauron/config"
+	"sauron/internal/urlutil"
 	"sauron/metrics"
 	"sauron/storage"
 
@@ -53,14 +54,7 @@ func (c *RPCChecker) CheckNode(ctx context.Context, node config.Node) error {
 	}
 
 	// Build URL (add https:// if missing, /status endpoint)
-	url := node.RPC
-	if len(url) > 0 && url[len(url)-1] == '/' {
-		url = url[:len(url)-1]
-	}
-	if len(url) > 0 && url[0] != 'h' {
-		url = "https://" + url
-	}
-	url += "/status"
+	url := urlutil.NormalizeURL(node.RPC) + "/status"
 
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
