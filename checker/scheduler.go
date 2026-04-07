@@ -164,16 +164,7 @@ func (s *Scheduler) checkInternalNodes() {
 				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 				defer cancel()
 
-				// Find the network config for this node to get grpc_insecure setting
-				grpcInsecure := false
-				for _, network := range cfg.Networks {
-					if network.Name == node.Network {
-						grpcInsecure = network.GRPCInsecure
-						break
-					}
-				}
-
-				if err := s.grpcChecker.CheckNode(ctx, node, grpcInsecure); err != nil {
+				if err := s.grpcChecker.CheckNode(ctx, node); err != nil {
 					s.logger.Debug("gRPC check failed",
 						zap.String("node", node.Name),
 						zap.Error(err),

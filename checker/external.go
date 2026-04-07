@@ -15,7 +15,6 @@ import (
 	"sauron/storage"
 
 	tmservice "cosmossdk.io/api/cosmos/base/tendermint/v1beta1"
-	"github.com/gorilla/websocket"
 	"github.com/puzpuzpuz/xsync/v4"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -231,7 +230,7 @@ func (c *ExternalChecker) validateEndpoint(ctx context.Context, externalName, ri
 
 	// For RPC endpoints, also check WebSocket connectivity
 	if endpointType == "rpc" {
-		wsAvailable := c.validateWebSocketEndpoint(ctx, url)
+		wsAvailable := CheckWebSocket(ctx, url, c.logger)
 		c.endpointStore.UpdateWebSocketAvailability(externalName, ringURL, network, endpointType, url, wsAvailable)
 
 		// Update WebSocket availability metric
@@ -322,103 +321,34 @@ func (c *ExternalChecker) validateGRPCEndpoint(ctx context.Context, url string, 
 	return latency, nil
 }
 
-// validateWebSocketEndpoint checks if a WebSocket endpoint is working
-// Returns true if WebSocket is available and working
-func (c *ExternalChecker) validateWebSocketEndpoint(ctx context.Context, url string) bool {
-	if url == "" {
-		return false
+// getGRPCConnection returns an existing connection or creates a new one.
+// LoadOrCompute guarantees the factory runs exactly once per key, eliminating
+// the TOCTOU race where two goroutines both see a cache miss and both create connections.
+func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
+	var createErr error
+
+	conn, _ := c.grpcConnections.LoadOrCompute(url, func() (newConn *grpc.ClientConn, cancel bool) {
+		newConn, createErr = c.createGRPCConnection(url, useInsecure)
+		if createErr != nil {
+			return nil, true // cancel the store; don't cache a nil value
+		}
+		return newConn, false
+	})
+
+	if createErr != nil {
+		return nil, createErr
 	}
-
-	// Build WebSocket URL
-	wsURL := url
-	if len(wsURL) > 0 && wsURL[len(wsURL)-1] == '/' {
-		wsURL = wsURL[:len(wsURL)-1]
+	if conn == nil {
+		return nil, fmt.Errorf("connection creation cancelled for url %s", url)
 	}
-
-	// Convert http(s):// to ws(s)://
-	if strings.HasPrefix(wsURL, "http://") {
-		wsURL = "ws://" + wsURL[7:]
-	} else if strings.HasPrefix(wsURL, "https://") {
-		wsURL = "wss://" + wsURL[8:]
-	} else if len(wsURL) > 0 && wsURL[0] != 'w' {
-		// Assume https if no protocol specified
-		wsURL = "wss://" + wsURL
-	}
-	wsURL += "/websocket"
-
-	// Create isolated WebSocket dialer with timeout (avoid race on DefaultDialer)
-	dialer := &websocket.Dialer{
-		HandshakeTimeout: 3 * time.Second,
-		Proxy:            websocket.DefaultDialer.Proxy,
-	}
-
-	// Connect to WebSocket
-	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
-	if err != nil {
-		c.logger.Debug("WebSocket connection failed for external endpoint",
-			zap.String("url", wsURL),
-			zap.Error(err),
-		)
-		return false
-	}
-	defer func() { _ = conn.Close() }()
-
-	// Set read deadline for response
-	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		c.logger.Debug("Failed to set read deadline for external endpoint",
-			zap.String("url", wsURL),
-			zap.Error(err),
-		)
-		return false
-	}
-
-	// Send a simple subscription test
-	subscribeMsg := []byte(`{"jsonrpc":"2.0","method":"subscribe","id":1,"params":{"query":"tm.event='NewBlock'"}}`)
-	if err := conn.WriteMessage(websocket.TextMessage, subscribeMsg); err != nil {
-		c.logger.Debug("WebSocket write failed for external endpoint",
-			zap.String("url", wsURL),
-			zap.Error(err),
-		)
-		return false
-	}
-
-	// Try to read response
-	_, _, err = conn.ReadMessage()
-	if err != nil {
-		c.logger.Debug("WebSocket read failed for external endpoint",
-			zap.String("url", wsURL),
-			zap.Error(err),
-		)
-		return false
-	}
-
-	// Cleanup: unsubscribe and close gracefully
-	unsubscribeMsg := []byte(`{"jsonrpc":"2.0","method":"unsubscribe","id":2,"params":{"query":"tm.event='NewBlock'"}}`)
-	_ = conn.WriteMessage(websocket.TextMessage, unsubscribeMsg)
-
-	// Send close frame
-	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-
-	c.logger.Debug("WebSocket check successful for external endpoint",
-		zap.String("url", wsURL),
-	)
-
-	return true
+	return conn, nil
 }
 
-// getGRPCConnection returns an existing connection or creates a new one
-// useInsecure parameter controls whether to use TLS (false) or not (true)
-func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
-	// Check if we already have a connection for this URL
-	if conn, exists := c.grpcConnections.Load(url); exists {
-		return conn, nil
-	}
-
-	// Build gRPC dial options based on useInsecure flag
+// createGRPCConnection dials gRPC and warms up the connection.
+func (c *ExternalChecker) createGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
 	var opts []grpc.DialOption
 
 	if useInsecure {
-		// Use insecure connection (no TLS)
 		opts = []grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -427,16 +357,12 @@ func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc
 				PermitWithoutStream: true,
 			}),
 			grpc.WithConnectParams(grpc.ConnectParams{
-				MinConnectTimeout: 10 * time.Second, // Give connection time to establish
+				MinConnectTimeout: 10 * time.Second,
 			}),
 		}
 	} else {
-		// Use TLS connection
-		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
+		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 		creds := credentials.NewTLS(tlsConfig)
-
 		opts = []grpc.DialOption{
 			grpc.WithTransportCredentials(creds),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -445,34 +371,28 @@ func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc
 				PermitWithoutStream: true,
 			}),
 			grpc.WithConnectParams(grpc.ConnectParams{
-				MinConnectTimeout: 10 * time.Second, // Give connection time to establish
+				MinConnectTimeout: 10 * time.Second,
 			}),
 		}
 	}
 
-	// Use passthrough:/// resolver to avoid DNS resolver IPv6 timeout issues with Cloudflare
+	// Use passthrough:/// resolver to avoid DNS resolver IPv6 timeout issues
 	target := url
 	if !strings.HasPrefix(target, "passthrough://") && !strings.HasPrefix(target, "dns://") {
 		target = "passthrough:///" + target
 	}
 
-	// Create connection
 	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Warm up the connection by making a test RPC call (best effort, non-blocking)
-	// This is an optimization to force connection establishment immediately
-	// If it fails, we still return the connection and let the first validation establish it
+	// Warm up — best effort, non-blocking
 	client := tmservice.NewServiceClient(conn)
 	warmupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = client.GetLatestBlock(warmupCtx, &tmservice.GetLatestBlockRequest{})
-	if err != nil {
-		// Warmup failed (likely slow network or TLS negotiation timeout)
-		// Log warning but continue - connection will be established on first validation
+	if _, err := client.GetLatestBlock(warmupCtx, &tmservice.GetLatestBlockRequest{}); err != nil {
 		c.logger.Warn("gRPC connection warmup failed, will establish on first validation",
 			zap.String("url", url),
 			zap.Error(err),
@@ -483,8 +403,6 @@ func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc
 		)
 	}
 
-	// Store connection for reuse
-	c.grpcConnections.Store(url, conn)
 	return conn, nil
 }
 
@@ -532,10 +450,9 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 
 		// For RPC endpoints, also check WebSocket connectivity after recovery
 		if ep.Type == "rpc" {
-			wsAvailable := c.validateWebSocketEndpoint(ctx, ep.URL)
+			wsAvailable := CheckWebSocket(ctx, ep.URL, c.logger)
 			c.endpointStore.UpdateWebSocketAvailability(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, wsAvailable)
 
-			// Update WebSocket availability metric
 			if wsAvailable {
 				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, "rpc").Set(1)
 			} else {
