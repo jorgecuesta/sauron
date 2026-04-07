@@ -114,7 +114,7 @@ func TestGetOrCreateConnection_ClosesShutdownConnection(t *testing.T) {
 
 	// Create a real connection and immediately close it so it enters SHUTDOWN.
 	deadConn := dialInsecure(t, addr)
-	deadConn.Close() // drives state → SHUTDOWN
+	_ = deadConn.Close() // drives state → SHUTDOWN
 
 	// Verify it really is SHUTDOWN before seeding.
 	if deadConn.GetState() != connectivity.Shutdown {
@@ -131,7 +131,7 @@ func TestGetOrCreateConnection_ClosesShutdownConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getOrCreateConnection: %v", err)
 	}
-	defer newConn.Close()
+	defer func() { _ = newConn.Close() }()
 
 	// The returned connection must not be the dead one.
 	if newConn == deadConn {

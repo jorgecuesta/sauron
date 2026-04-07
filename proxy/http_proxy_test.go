@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"sync"
@@ -69,28 +68,6 @@ internals:
 
 // newTestProxy creates a fully-wired HTTPProxy that routes to a backend whose
 // URL is passed in. The height store is seeded so GetBestNode succeeds.
-func newTestProxy(t *testing.T, backendURL string) *HTTPProxy {
-	t.Helper()
-
-	logger := zap.NewNop()
-	cfgLoader := createTestConfigLoader(t)
-
-	heightStore := storage.NewHeightStore()
-	// Seed node-1 so GetBestNode returns it.
-	heightStore.Update("testnet", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	// Point the config's node-1 endpoint to the test backend by patching the
-	// selector's GetEndpointURL indirectly — we actually need the config to
-	// contain the backend URL. But since we can't change it after loading, we
-	// use a tiny trick: the externalEndpointStore is nil so the selector will
-	// use internal nodes only.  For TestConcurrentServeHTTP_NoRace and
-	// TestDirector* we test the director and the proxy struct directly.
-
-	endpointStore := storage.NewExternalEndpointStore(logger)
-	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, logger)
-
-	return NewHTTPProxy(sel, cfgLoader, endpointStore, logger, "api", "testnet")
-}
-
 // ---------------------------------------------------------------------------
 // T1: TestDirectorPreservesRawQuery
 // ---------------------------------------------------------------------------
@@ -108,12 +85,8 @@ func TestDirectorPreservesRawQuery(t *testing.T) {
 	ctx := context.WithValue(req.Context(), targetContextKey, target)
 	req = req.WithContext(ctx)
 
-	// Build a proxy the same way NewHTTPProxy does so we can call its Director.
-	p := &HTTPProxy{logger: zap.NewNop()}
-	p.reverseProxy = buildTestReverseProxy(p)
-
-	// Invoke the Director.
-	p.reverseProxy.Director(req)
+	// Call the director logic directly (not through the deprecated Director field).
+	applyDirector(req, zap.NewNop())
 
 	q := req.URL.RawQuery
 	if q != "key=abc&page=1" {
@@ -121,30 +94,25 @@ func TestDirectorPreservesRawQuery(t *testing.T) {
 	}
 }
 
-// buildTestReverseProxy replicates the Director/ErrorHandler wiring from
-// NewHTTPProxy so we can unit-test the Director in isolation.
-func buildTestReverseProxy(p *HTTPProxy) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			target, _ := req.Context().Value(targetContextKey).(*url.URL)
-			if target == nil {
-				return
-			}
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-			if target.Path != "" && req.URL.RawPath != "" {
-				req.URL.RawPath = singleJoiningSlash(target.RawPath, req.URL.RawPath)
-			}
-			if target.RawQuery == "" || req.URL.RawQuery == "" {
-				req.URL.RawQuery = target.RawQuery + req.URL.RawQuery
-			} else {
-				req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
-			}
-			req.Host = target.Host
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {},
+// applyDirector replicates the Director logic from NewHTTPProxy so we can
+// unit-test URL rewriting without going through the deprecated Director field.
+func applyDirector(req *http.Request, logger *zap.Logger) {
+	target, _ := req.Context().Value(targetContextKey).(*url.URL)
+	if target == nil {
+		return
 	}
+	req.URL.Scheme = target.Scheme
+	req.URL.Host = target.Host
+	req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+	if target.Path != "" && req.URL.RawPath != "" {
+		req.URL.RawPath = singleJoiningSlash(target.RawPath, req.URL.RawPath)
+	}
+	if target.RawQuery == "" || req.URL.RawQuery == "" {
+		req.URL.RawQuery = target.RawQuery + req.URL.RawQuery
+	} else {
+		req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
+	}
+	req.Host = target.Host
 }
 
 // ---------------------------------------------------------------------------
@@ -160,9 +128,7 @@ func TestDirectorSetsTargetFromContext(t *testing.T) {
 	ctx := context.WithValue(req.Context(), targetContextKey, target)
 	req = req.WithContext(ctx)
 
-	p := &HTTPProxy{logger: zap.NewNop()}
-	p.reverseProxy = buildTestReverseProxy(p)
-	p.reverseProxy.Director(req)
+	applyDirector(req, zap.NewNop())
 
 	if req.URL.Scheme != "https" {
 		t.Errorf("scheme: want %q got %q", "https", req.URL.Scheme)
