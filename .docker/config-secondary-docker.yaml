@@ -22,30 +22,21 @@ networks:
     grpc_listen: ":7082"
     grpc_insecure: true
 
-# Internal nodes monitored by secondary - Real Pocket Network nodes
 internals:
-  - name: fn-one
-    api: "https://fn-one-api.example.com"
-    rpc: "https://fn-one-rpc.example.com"
-    grpc: "fn-one-grpc.example.com:443"
+  - name: seed-two
+    api: "https://api-seed-two.infra.pocket.network"
+    rpc: "https://rpc-seed-two.infra.pocket.network"
+    grpc: "grpc-seed-two.infra.pocket.network:443"
     grpc_insecure: false
     network: "pocket"
 
-  - name: fn-two
-    api: "https://fn-two-api.example.com"
-    rpc: "https://fn-two-rpc.example.com"
-    grpc: "fn-two-grpc.example.com:443"
+  - name: seed-three
+    api: "https://api-seed-three.infra.pocket.network"
+    rpc: "https://rpc-seed-three.infra.pocket.network"
+    grpc: "grpc-seed-three.infra.pocket.network:443"
     grpc_insecure: false
     network: "pocket"
 
-  - name: fn-three
-    api: "https://fn-three-api.example.com"
-    rpc: "https://fn-three-rpc.example.com"
-    grpc: "fn-three-grpc.example.com:443"
-    grpc_insecure: false
-    network: "pocket"
-
-# No external rings for secondary (leaf node)
 externals: []
 
 users:
