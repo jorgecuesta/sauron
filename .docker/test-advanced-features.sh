@@ -98,14 +98,22 @@ print_header "Test Suite 1: Routing to External Endpoints"
 run_test
 print_test "Verify external endpoints are available for selection"
 
-# Wait for endpoint discovery
-sleep 5
+# Poll for endpoint discovery and validation (discovery runs every 10s, validation follows)
+print_info "Polling for external endpoint validation (max 60s)..."
+TIMEOUT=60
+ELAPSED=0
+VALIDATED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    VALIDATED=${VALIDATED:-0}
+    if [ "$VALIDATED" -ge 3 ]; then
+        break
+    fi
+    sleep 5
+    ((ELAPSED+=5))
+done
 
-# Check that external endpoints are validated
-VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-VALIDATED=${VALIDATED:-0}  # Default to 0 if empty
-
-print_info "Validated external endpoints: $VALIDATED"
+print_info "Validated external endpoints: $VALIDATED (after ${ELAPSED}s)"
 
 if [ "$VALIDATED" -ge 3 ]; then
     print_pass "External endpoints validated and available for routing"
@@ -158,15 +166,22 @@ sleep 3
 run_test
 print_test "Verify primary detects the failure"
 
-# Wait for health checks to run (longer with Redis enabled)
-print_info "Waiting 20s for health checks to detect failure..."
-sleep 20
+# Poll for failure detection — checker runs every 10s, needs time after docker stop
+print_info "Polling for failure detection (max 45s)..."
+TIMEOUT=45
+ELAPSED=0
+FAILURES=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    FAILURES=$(docker logs sauron-primary 2>&1 | grep -E "Endpoint validation failed|marked as not working|External ring check failed" | wc -l)
+    FAILURES=${FAILURES:-0}
+    if [ "$FAILURES" -gt 0 ]; then
+        break
+    fi
+    sleep 5
+    ((ELAPSED+=5))
+done
 
-# Check logs for validation failures (actual messages: "Endpoint validation failed" or "marked as not working")
-FAILURES=$(docker logs sauron-primary 2>&1 | grep -E "Endpoint validation failed|marked as not working" | wc -l)
-FAILURES=${FAILURES:-0}  # Default to 0 if empty
-
-print_info "Detected $FAILURES failure events in logs"
+print_info "Detected $FAILURES failure events in logs (after ${ELAPSED}s)"
 
 if [ "$FAILURES" -gt 0 ]; then
     print_pass "Primary detected endpoint failures"
@@ -223,41 +238,44 @@ fi
 run_test
 print_test "Verify primary detects recovery"
 
-print_info "Waiting 20s for recovery health checks..."
-sleep 20
+# Poll for recovery instead of fixed sleep — gRPC validation can take longer
+print_info "Polling for endpoint recovery (max 60s)..."
+TIMEOUT=60
+ELAPSED=0
+VALIDATED_AFTER=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    VALIDATED_AFTER=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    VALIDATED_AFTER=${VALIDATED_AFTER:-0}
+    if [ "$VALIDATED_AFTER" -ge 3 ]; then
+        break
+    fi
+    sleep 5
+    ((ELAPSED+=5))
+done
 
-# Check for recovery events in logs
-RECOVERIES=$(docker logs sauron-primary 2>&1 | tail -50 | grep -i "recovered\|validated successfully" | wc -l)
-RECOVERIES=${RECOVERIES:-0}  # Default to 0 if empty
-
-print_info "Recovery events detected: $RECOVERIES"
-
-if [ "$RECOVERIES" -gt 0 ]; then
-    print_pass "Primary detected endpoint recovery"
+if [ "$VALIDATED_AFTER" -ge 3 ]; then
+    print_pass "All 3 endpoint types recovered and re-validated after ${ELAPSED}s"
     docker logs sauron-primary 2>&1 | tail -30 | grep -i "recovered\|validated successfully" | tail -3
 else
-    print_fail "Primary did not detect endpoint recovery"
+    print_fail "Not all endpoints recovered (validated: $VALIDATED_AFTER/3 after ${TIMEOUT}s)"
 fi
 
 run_test
 print_test "Check recovery metrics"
 
 RECOVERY_COUNT=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_recoveries_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-RECOVERY_COUNT=${RECOVERY_COUNT:-0}  # Default to 0 if empty
+RECOVERY_COUNT=${RECOVERY_COUNT:-0}
 
 print_info "Total recoveries: $RECOVERY_COUNT"
 
-# Recovery metric only increments when endpoint goes from FAILED → VALIDATED
-# If container restarts quickly, endpoints may not reach FAILED state (requires multiple consecutive errors)
-# So recovery count might be 0, which is valid behavior
+# Recovery metric only increments on FAILED → VALIDATED transition.
+# If container restarts quickly, endpoints may not reach FAILED state (needs 3 consecutive errors).
+# So we verify validation count instead — the ground truth.
 if [ "$RECOVERY_COUNT" -gt 0 ]; then
     print_pass "Recovery metrics recorded ($RECOVERY_COUNT recoveries)"
 else
-    # Check if endpoints are validated again (indirect recovery proof)
-    VALIDATED_AFTER=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-    VALIDATED_AFTER=${VALIDATED_AFTER:-0}  # Default to 0 if empty
     if [ "$VALIDATED_AFTER" -ge 3 ]; then
-        print_pass "Endpoints recovered and re-validated (recovery metric tracking works for FAILED→VALIDATED transitions)"
+        print_pass "Endpoints re-validated (fast restart prevented FAILED state, which is correct behavior)"
     else
         print_fail "Endpoints did not recover (validated: $VALIDATED_AFTER, expected: 3)"
     fi
