@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"sauron/config"
@@ -20,16 +22,36 @@ import (
 	"go.uber.org/zap"
 )
 
+// contextKey is an unexported type for context keys in this package.
+type contextKey int
+
+const targetContextKey contextKey = iota
+
+// singleJoiningSlash replicates the stdlib helper used by httputil.NewSingleHostReverseProxy.
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
+}
+
 // HTTPProxy handles HTTP/API and RPC proxying
 // The gates through which the Ringwraiths pass
 type HTTPProxy struct {
-	selector      *selector.Selector
-	configLoader  *config.Loader
-	endpointStore *storage.ExternalEndpointStore
-	transport     *http.Transport
-	logger        *zap.Logger
-	endpointType  string // "api" or "rpc"
-	network       string // The network this proxy serves
+	selector       *selector.Selector
+	configLoader   *config.Loader
+	endpointStore  *storage.ExternalEndpointStore
+	transport      *http.Transport
+	reverseProxy   *httputil.ReverseProxy
+	logger         *zap.Logger
+	endpointType   string // "api" or "rpc"
+	network        string // The network this proxy serves
+	proxyTimeoutNs atomic.Int64
 }
 
 // NewHTTPProxy creates a new HTTP proxy for a specific network
@@ -41,17 +63,25 @@ func NewHTTPProxy(
 	endpointType string,
 	network string,
 ) *HTTPProxy {
-	// Optimized transport for maximum throughput
+	// C1 FIX: Read the timeout once here; never mutate transport after construction.
+	cfg := configLoader.Get()
+	proxyTimeout := cfg.Timeouts.Proxy
+	if proxyTimeout == 0 {
+		proxyTimeout = 60 * time.Second
+	}
+
+	// Optimized transport for maximum throughput.
+	// ResponseHeaderTimeout is set once, never mutated per-request.
 	transport := &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,
 		MaxConnsPerHost:       0, // Unlimited
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second, // Will be updated from config
+		ResponseHeaderTimeout: proxyTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 	}
 
-	return &HTTPProxy{
+	p := &HTTPProxy{
 		selector:      selector,
 		configLoader:  configLoader,
 		endpointStore: endpointStore,
@@ -60,6 +90,67 @@ func NewHTTPProxy(
 		endpointType:  endpointType,
 		network:       network,
 	}
+	// Store timeout as nanoseconds for potential future hot-reload.
+	p.proxyTimeoutNs.Store(int64(proxyTimeout))
+
+	// H1 FIX: Build ONE shared ReverseProxy in the constructor.
+	// The Director reads the target URL from request context so it is
+	// safe to share across all concurrent requests.
+	rp := &httputil.ReverseProxy{
+		Transport: transport,
+		Director: func(req *http.Request) {
+			target, _ := req.Context().Value(targetContextKey).(*url.URL)
+			if target == nil {
+				return
+			}
+
+			// Replicate full httputil.NewSingleHostReverseProxy Director behavior:
+			// 1. Set scheme and host.
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+
+			// 2. Merge paths using singleJoiningSlash.
+			req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+			if target.Path != "" && req.URL.RawPath != "" {
+				req.URL.RawPath = singleJoiningSlash(target.RawPath, req.URL.RawPath)
+			}
+
+			// 3. Merge RawQuery — join with "&" when both non-empty.
+			if target.RawQuery == "" || req.URL.RawQuery == "" {
+				req.URL.RawQuery = target.RawQuery + req.URL.RawQuery
+			} else {
+				req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
+			}
+
+			// 4. Set Host header to backend host.
+			req.Host = target.Host
+
+			// Log outgoing request (Debug — hot path).
+			p.logger.Debug("Outgoing request to backend",
+				zap.String("method", req.Method),
+				zap.String("url", req.URL.String()),
+				zap.String("host", req.Host),
+				zap.String("path", req.URL.Path),
+				zap.String("raw_query", req.URL.RawQuery),
+			)
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			target, _ := r.Context().Value(targetContextKey).(*url.URL)
+			backendHost := ""
+			if target != nil {
+				backendHost = target.Host
+			}
+			p.logger.Error("Reverse proxy error",
+				zap.Error(err),
+				zap.String("path", r.URL.Path),
+				zap.String("backend", backendHost),
+			)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		},
+	}
+
+	p.reverseProxy = rp
+	return p
 }
 
 // isWebSocketRequest checks if this is a WebSocket upgrade request
@@ -73,17 +164,13 @@ func isWebSocketRequest(r *http.Request) bool {
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Log every request for debugging
-	p.logger.Info("Proxy request received",
+	// H3 FIX: per-request logs demoted to Debug.
+	p.logger.Debug("Proxy request received",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
 		zap.String("type", p.endpointType),
 		zap.Bool("websocket", isWebSocketRequest(r)),
 	)
-
-	// Update timeout from config
-	cfg := p.configLoader.Get()
-	p.transport.ResponseHeaderTimeout = cfg.Timeouts.Proxy
 
 	// Use the network this proxy is configured for (no detection needed!)
 	network := p.network
@@ -110,7 +197,8 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.logger.Info("Routing decision made",
+	// H3 FIX: per-request logs demoted to Debug.
+	p.logger.Debug("Routing decision made",
 		zap.String("network", network),
 		zap.String("selected_node", nodeName),
 		zap.String("target_url", targetURL),
@@ -128,55 +216,40 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle WebSocket upgrade requests separately
+	// Handle WebSocket upgrade requests separately.
+	// H9 FIX: pass nodeMetrics so handleWebSocket doesn't call GetBestNode again.
 	if isWebSocketRequest(r) {
-		p.handleWebSocket(w, r, target, nodeName, network, start, decision)
+		p.handleWebSocket(w, r, target, nodeName, network, start, decision, nodeMetrics)
 		return
 	}
 
-	// Create reverse proxy
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = p.transport
+	// H1 FIX: store target in context so the shared Director can read it.
+	ctx := context.WithValue(r.Context(), targetContextKey, target)
+	r = r.WithContext(ctx)
 
-	// Customize the Director to properly forward path, headers, and query params
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		// CRITICAL: Set the Host header to the backend host, not the proxy host
-		req.Host = target.Host
-		// Log what we're sending to backend
-		p.logger.Info("Outgoing request to backend",
-			zap.String("method", req.Method),
-			zap.String("url", req.URL.String()),
-			zap.String("host", req.Host),
-			zap.String("path", req.URL.Path),
-			zap.String("raw_query", req.URL.RawQuery),
-		)
-	}
-
-	// Add error handler to log proxy errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		p.logger.Error("Reverse proxy error",
-			zap.Error(err),
-			zap.String("path", r.URL.Path),
-			zap.String("backend", target.Host),
-		)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	// Apply per-request timeout via context (dynamic, race-free).
+	timeoutNs := p.proxyTimeoutNs.Load()
+	if timeoutNs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(r.Context(), time.Duration(timeoutNs))
+		defer cancel()
+		r = r.WithContext(ctx)
 	}
 
 	// Wrap response writer to track status and size
 	tracker := &responseTracker{ResponseWriter: w, statusCode: 200}
 
-	// Proxy the request
-	p.logger.Info("Proxying to backend",
+	// H3 FIX: per-request logs demoted to Debug.
+	p.logger.Debug("Proxying to backend",
 		zap.String("backend_host", target.Host),
 		zap.String("backend_scheme", target.Scheme),
 		zap.String("request_path", r.URL.Path),
 		zap.String("request_query", r.URL.RawQuery),
 	)
-	proxy.ServeHTTP(tracker, r)
+	p.reverseProxy.ServeHTTP(tracker, r)
 
-	p.logger.Info("Backend response received",
+	// H3 FIX: per-request log demoted to Debug.
+	p.logger.Debug("Backend response received",
 		zap.Int("status_code", tracker.statusCode),
 		zap.Int64("response_bytes", tracker.bytesWritten),
 	)
@@ -242,23 +315,23 @@ func (rt *responseTracker) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// handleWebSocket handles WebSocket proxy requests
-func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision) {
+// handleWebSocket handles WebSocket proxy requests.
+// H9 FIX: accepts nodeMetrics directly instead of calling GetBestNode again.
+func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision, nodeMetrics *storage.NodeMetrics) {
 	p.logger.Info("Handling WebSocket upgrade",
 		zap.String("target_host", target.Host),
 		zap.String("target_scheme", target.Scheme),
 		zap.String("path", r.URL.Path),
 	)
 
-	// Check if the selected node supports WebSocket
-	nodeMetrics, selectedNode, _ := p.selector.GetBestNode(network, p.endpointType)
-	if nodeMetrics != nil && !nodeMetrics.WebSocketAvailable {
+	// H9 FIX: Use the already-selected nodeMetrics directly — no second GetBestNode call.
+	if !nodeMetrics.WebSocketAvailable {
 		p.logger.Warn("Selected node does not support WebSocket",
-			zap.String("node", selectedNode),
+			zap.String("node", nodeName),
 			zap.String("network", network),
 		)
 		http.Error(w, "WebSocket not supported by selected backend", http.StatusServiceUnavailable)
-		metrics.ProxyErrors.WithLabelValues(network, selectedNode, p.endpointType, "503", "websocket_not_supported").Inc()
+		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "503", "websocket_not_supported").Inc()
 		return
 	}
 
@@ -362,37 +435,23 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 	// Bidirectional copy
 	errChan := make(chan error, 2)
 
-	// Client -> Backend
+	// H9 FIX (bidirectional copy): copy from clientBuf (not clientConn) so that
+	// bytes already buffered by the hijack bufio.ReadWriter are not lost.
 	go func() {
-		var written int64
-		if clientBuf.Reader.Buffered() > 0 {
-			// Forward any buffered data first
-			buffered, _ := clientBuf.Peek(clientBuf.Reader.Buffered())
-			_, _ = backendConn.Write(buffered)
-			written += int64(len(buffered))
-		}
-		n, err := io.Copy(backendConn, clientConn)
-		written += n
+		n, err := io.Copy(backendConn, clientBuf)
 		p.logger.Debug("Client->Backend copy finished",
-			zap.Int64("bytes", written),
+			zap.Int64("bytes", n),
 			zap.Error(err),
 		)
 		errChan <- err
 	}()
 
-	// Backend -> Client
+	// H9 FIX (bidirectional copy): copy from backendBuf (not backendConn) so that
+	// bytes already buffered while reading the upgrade response are not lost.
 	go func() {
-		var written int64
-		if backendBuf.Buffered() > 0 {
-			// Forward any buffered data first
-			buffered, _ := backendBuf.Peek(backendBuf.Buffered())
-			_, _ = clientConn.Write(buffered)
-			written += int64(len(buffered))
-		}
-		n, err := io.Copy(clientConn, backendConn)
-		written += n
+		n, err := io.Copy(clientConn, backendBuf)
 		p.logger.Debug("Backend->Client copy finished",
-			zap.Int64("bytes", written),
+			zap.Int64("bytes", n),
 			zap.Error(err),
 		)
 		errChan <- err
