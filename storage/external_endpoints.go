@@ -170,52 +170,6 @@ func (s *ExternalEndpointStore) MarkValidationFailed(externalName, ringURL, netw
 	metrics.ExternalEndpointValidationAttempts.WithLabelValues(network, endpointType, externalName, "failure").Inc()
 }
 
-// IncrementErrorCount increments the error count for a proxy error (5xx only)
-// Marks as not working if error count >= 3
-func (s *ExternalEndpointStore) IncrementErrorCount(externalName, ringURL, network, endpointType, url string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key := s.makeKey(externalName, ringURL, network, endpointType, url)
-	ep, exists := s.endpoints[key]
-	if !exists {
-		return
-	}
-
-	ep.ErrorCount++
-	ep.LastError = time.Now()
-
-	if ep.ErrorCount >= 3 && ep.IsWorking {
-		ep.IsWorking = false
-		s.logger.Warn("Endpoint marked as not working due to errors",
-			zap.String("external", externalName),
-			zap.String("ring", ringURL),
-			zap.String("network", network),
-			zap.String("type", endpointType),
-			zap.String("url", url),
-			zap.Int("error_count", ep.ErrorCount),
-		)
-	}
-}
-
-// RemoveEndpoint removes an endpoint that is no longer advertised
-func (s *ExternalEndpointStore) RemoveEndpoint(externalName, ringURL, network, endpointType, url string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key := s.makeKey(externalName, ringURL, network, endpointType, url)
-	if _, exists := s.endpoints[key]; exists {
-		delete(s.endpoints, key)
-		s.logger.Info("Removed endpoint (no longer advertised)",
-			zap.String("external", externalName),
-			zap.String("ring", ringURL),
-			zap.String("network", network),
-			zap.String("type", endpointType),
-			zap.String("url", url),
-		)
-	}
-}
-
 // GetValidatedEndpoints returns all validated+working endpoints for a network/type
 func (s *ExternalEndpointStore) GetValidatedEndpoints(network, endpointType string) []*ExternalEndpoint {
 	s.mu.RLock()
@@ -248,22 +202,6 @@ func (s *ExternalEndpointStore) GetFailedEndpoints() []*ExternalEndpoint {
 	}
 
 	return failed
-}
-
-// GetAllAdvertised returns all advertised endpoints (validated or not)
-func (s *ExternalEndpointStore) GetAllAdvertised(externalName, ringURL, network string) []*ExternalEndpoint {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var endpoints []*ExternalEndpoint
-	for _, ep := range s.endpoints {
-		if ep.ExternalName == externalName && ep.RingURL == ringURL && ep.Network == network {
-			epCopy := *ep
-			endpoints = append(endpoints, &epCopy)
-		}
-	}
-
-	return endpoints
 }
 
 // TrackProxyError tracks a proxy error for an endpoint identified by URL

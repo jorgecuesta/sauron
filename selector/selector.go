@@ -1,6 +1,8 @@
 package selector
 
 import (
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,7 +20,7 @@ type Selector struct {
 	endpointStore *storage.ExternalEndpointStore
 	configLoader  *config.Loader
 	logger        *zap.Logger
-	rrCounter     uint64 // Round-robin counter for load distribution
+	rrCounters    sync.Map // map[string]*uint64 — per "network:type" round-robin counter
 }
 
 // SelectionDecision tracks why a node was selected
@@ -95,7 +97,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		shouldAddExternals := maxInternalHeight == 0 || maxExternalHeight > maxInternalHeight+threshold
 
 		if shouldAddExternals && len(externalEndpoints) > 0 {
-			s.logger.Info("Selector: adding external endpoints to candidates",
+			s.logger.Debug("Selector: adding external endpoints to candidates",
 				zap.String("network", network),
 				zap.String("type", endpointType),
 				zap.Int("external_count", len(externalEndpoints)),
@@ -143,7 +145,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		return nil, "", nil
 	}
 
-	s.logger.Info("Selector: total candidates",
+	s.logger.Debug("Selector: total candidates",
 		zap.String("network", network),
 		zap.String("type", endpointType),
 		zap.Int("total", len(nodes)),
@@ -162,7 +164,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		if node.metrics.Height > maxHeight {
 			maxHeight = node.metrics.Height
 		}
-		s.logger.Info("Selector: candidate node",
+		s.logger.Debug("Selector: candidate node",
 			zap.String("node", node.name),
 			zap.Int64("height", node.metrics.Height),
 			zap.Duration("latency", node.metrics.AvgLatency),
@@ -171,7 +173,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	}
 	decision.MaxHeight = maxHeight
 
-	s.logger.Info("Selector: max height determined",
+	s.logger.Debug("Selector: max height determined",
 		zap.String("network", network),
 		zap.String("type", endpointType),
 		zap.Int64("max_height", maxHeight),
@@ -195,9 +197,15 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		}
 	}
 
-	// Step 3: Among nodes with max height, distribute using round-robin
-	// Increment counter atomically and select node by index
-	counter := atomic.AddUint64(&s.rrCounter, 1)
+	// Step 2b: Sort maxHeightNodes by name for deterministic round-robin (M23)
+	sort.Slice(maxHeightNodes, func(i, j int) bool {
+		return maxHeightNodes[i].name < maxHeightNodes[j].name
+	})
+
+	// Step 3: Among nodes with max height, distribute using per-key round-robin (M24)
+	rrKey := network + ":" + endpointType
+	counterPtr, _ := s.rrCounters.LoadOrStore(rrKey, new(uint64))
+	counter := atomic.AddUint64(counterPtr.(*uint64), 1)
 	selectedIndex := int(counter % uint64(len(maxHeightNodes)))
 	bestNode := maxHeightNodes[selectedIndex]
 
@@ -213,11 +221,15 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	decision.SelectedNode = bestNode.name
 	decision.SelectedLatency = bestNode.metrics.AvgLatency
 
-	// Record metrics
+	// Record metrics — use node source category to avoid cardinality explosion (H10)
+	nodeSource := bestNode.metrics.Source
+	if nodeSource == "" {
+		nodeSource = "internal"
+	}
 	metrics.RoutingSelections.WithLabelValues(
 		network,
 		endpointType,
-		bestNode.name,
+		nodeSource,
 		decision.Reason,
 	).Inc()
 

@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"sync"
+	"sync/atomic"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -12,8 +12,7 @@ import (
 // Loader handles configuration loading and hot reloading
 // The keeper of the ancient texts
 type Loader struct {
-	config *Config
-	mu     sync.RWMutex
+	config atomic.Pointer[Config]
 	logger *zap.Logger
 	v      *viper.Viper
 }
@@ -45,7 +44,7 @@ func NewLoader(configPath string, logger *zap.Logger) (*Loader, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	l.config = &cfg
+	l.config.Store(&cfg)
 	logger.Info("Configuration loaded successfully",
 		zap.String("path", configPath),
 		zap.Int("internal_nodes", len(cfg.Internals)),
@@ -75,9 +74,7 @@ func (l *Loader) onConfigChange(e fsnotify.Event) {
 		return
 	}
 
-	l.mu.Lock()
-	l.config = &newCfg
-	l.mu.Unlock()
+	l.config.Store(&newCfg)
 
 	l.logger.Info("Configuration reloaded successfully",
 		zap.Int("internal_nodes", len(newCfg.Internals)),
@@ -86,40 +83,8 @@ func (l *Loader) onConfigChange(e fsnotify.Event) {
 	)
 }
 
-// Get returns the current configuration (thread-safe)
+// Get returns the current configuration (thread-safe, zero allocation).
+// The returned *Config is immutable — callers must not modify it.
 func (l *Loader) Get() *Config {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	// Deep copy to prevent external modifications to slices
-	cfg := Config{
-		API:                       l.config.API,
-		RPC:                       l.config.RPC,
-		GRPC:                      l.config.GRPC,
-		Auth:                      l.config.Auth,
-		Listen:                    l.config.Listen,
-		ExternalFailoverThreshold: l.config.ExternalFailoverThreshold,
-		Timeouts:                  l.config.Timeouts,
-		Redis:                     l.config.Redis,
-		RateLimit:                 l.config.RateLimit,
-		// Deep copy slices
-		Networks:  make([]Network, len(l.config.Networks)),
-		Internals: make([]Node, len(l.config.Internals)),
-		Externals: make([]External, len(l.config.Externals)),
-		Users:     make([]User, len(l.config.Users)),
-	}
-
-	// Copy slice elements
-	copy(cfg.Networks, l.config.Networks)
-	copy(cfg.Internals, l.config.Internals)
-	copy(cfg.Externals, l.config.Externals)
-	copy(cfg.Users, l.config.Users)
-
-	// Deep copy nested slices in Externals (Rings field)
-	for i := range cfg.Externals {
-		cfg.Externals[i].Rings = make([]string, len(l.config.Externals[i].Rings))
-		copy(cfg.Externals[i].Rings, l.config.Externals[i].Rings)
-	}
-
-	return &cfg
+	return l.config.Load()
 }

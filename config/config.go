@@ -90,19 +90,24 @@ type User struct {
 	GRPC  bool   `mapstructure:"grpc"`
 }
 
-// GetEnabledTypes returns which endpoint types are globally enabled
-func (c *Config) GetEnabledTypes() []string {
+// enabledTypesFromFlags builds an endpoint type slice from boolean flags.
+func enabledTypesFromFlags(api, rpc, grpc bool) []string {
 	var types []string
-	if c.API {
+	if api {
 		types = append(types, "api")
 	}
-	if c.RPC {
+	if rpc {
 		types = append(types, "rpc")
 	}
-	if c.GRPC {
+	if grpc {
 		types = append(types, "grpc")
 	}
 	return types
+}
+
+// GetEnabledTypes returns which endpoint types are globally enabled
+func (c *Config) GetEnabledTypes() []string {
+	return enabledTypesFromFlags(c.API, c.RPC, c.GRPC)
 }
 
 // GetUserPermissions returns the enabled types for a specific user
@@ -110,20 +115,20 @@ func (c *Config) GetEnabledTypes() []string {
 func (c *Config) GetUserPermissions(token string) []string {
 	for _, user := range c.Users {
 		if user.Token == token {
-			var types []string
-			if user.API {
-				types = append(types, "api")
-			}
-			if user.RPC {
-				types = append(types, "rpc")
-			}
-			if user.GRPC {
-				types = append(types, "grpc")
-			}
-			return types
+			return enabledTypesFromFlags(user.API, user.RPC, user.GRPC)
 		}
 	}
 	return c.GetEnabledTypes()
+}
+
+// FindNetwork returns the Network config for the given name, or nil if not found.
+func (c *Config) FindNetwork(name string) *Network {
+	for i := range c.Networks {
+		if c.Networks[i].Name == name {
+			return &c.Networks[i]
+		}
+	}
+	return nil
 }
 
 // FindUser finds a user by token using constant-time comparison to prevent timing attacks

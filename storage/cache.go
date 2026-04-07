@@ -70,24 +70,6 @@ func (c *Cache) SetHeight(ctx context.Context, network, node, endpointType strin
 	}
 }
 
-// GetHeight retrieves a cached height value
-func (c *Cache) GetHeight(ctx context.Context, network, node, endpointType string) (int64, bool) {
-	if c.client == nil {
-		return 0, false
-	}
-
-	key := fmt.Sprintf("height:%s:%s:%s", network, node, endpointType)
-	val, err := c.client.Get(ctx, key).Int64()
-	if err != nil {
-		if err != redis.Nil {
-			c.logger.Warn("Failed to get cache", zap.String("key", key), zap.Error(err))
-		}
-		return 0, false
-	}
-
-	return val, true
-}
-
 // SetLatency caches a latency value
 func (c *Cache) SetLatency(ctx context.Context, network, node, endpointType string, latency time.Duration, ttl time.Duration) {
 	if c.client == nil {

@@ -14,10 +14,12 @@ import (
 type RateLimiter struct {
 	limiters      map[string]*rate.Limiter
 	mu            sync.RWMutex
-	requestsPerIP int          // requests per time window
-	burst         int          // burst capacity
-	trustProxy    bool         // whether to trust X-Forwarded-For and similar headers
-	cleanupTicker *time.Ticker // periodic cleanup of old limiters
+	requestsPerIP int           // requests per time window
+	burst         int           // burst capacity
+	trustProxy    bool          // whether to trust X-Forwarded-For and similar headers
+	cleanupTicker *time.Ticker  // periodic cleanup of old limiters
+	stopCh        chan struct{} // signals cleanupLoop to exit
+	stopOnce      sync.Once     // ensures Stop is idempotent
 }
 
 // NewRateLimiter creates a new rate limiter
@@ -30,6 +32,7 @@ func NewRateLimiter(requestsPerIP int, burst int, trustProxy bool) *RateLimiter 
 		requestsPerIP: requestsPerIP,
 		burst:         burst,
 		trustProxy:    trustProxy,
+		stopCh:        make(chan struct{}),
 	}
 
 	// Start cleanup goroutine to prevent memory leaks
@@ -106,8 +109,13 @@ func (rl *RateLimiter) getClientIP(r *http.Request) string {
 
 // cleanupLoop periodically removes inactive limiters to prevent memory leaks
 func (rl *RateLimiter) cleanupLoop() {
-	for range rl.cleanupTicker.C {
-		rl.cleanup()
+	for {
+		select {
+		case <-rl.cleanupTicker.C:
+			rl.cleanup()
+		case <-rl.stopCh:
+			return
+		}
 	}
 }
 
@@ -125,9 +133,10 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
-// Stop stops the cleanup goroutine
+// Stop stops the cleanup goroutine (idempotent)
 func (rl *RateLimiter) Stop() {
-	if rl.cleanupTicker != nil {
+	rl.stopOnce.Do(func() {
 		rl.cleanupTicker.Stop()
-	}
+		close(rl.stopCh)
+	})
 }

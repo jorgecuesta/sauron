@@ -192,13 +192,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find the network config to get advertised endpoints
-	var networkConfig *config.Network
-	for _, net := range cfg.Networks {
-		if net.Name == network {
-			networkConfig = &net
-			break
-		}
-	}
+	networkConfig := cfg.FindNetwork(network)
 
 	// Add advertised endpoints based on enabled types
 	if networkConfig != nil {

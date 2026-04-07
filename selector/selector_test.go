@@ -635,9 +635,9 @@ func TestSelectorExternalNotWorking(t *testing.T) {
 	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 200, 20*time.Millisecond)
 
 	// Simulate 3 errors to mark as not working
-	endpointStore.IncrementErrorCount("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.IncrementErrorCount("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.IncrementErrorCount("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
+	endpointStore.TrackProxyError("pocket", "api", "https://ext1.example.com")
+	endpointStore.TrackProxyError("pocket", "api", "https://ext1.example.com")
+	endpointStore.TrackProxyError("pocket", "api", "https://ext1.example.com")
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 

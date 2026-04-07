@@ -14,7 +14,6 @@ import (
 type contextKey string
 
 const (
-	contextKeyUser         contextKey = "user"
 	contextKeyEnabledTypes contextKey = "enabled_types"
 	contextKeyRequestID    contextKey = "request_id"
 )
@@ -63,7 +62,6 @@ func (h *Handler) authMiddleware(next http.Handler) http.Handler {
 
 		// Add user info to context
 		ctx := r.Context()
-		ctx = context.WithValue(ctx, contextKeyUser, user.Name)
 		ctx = context.WithValue(ctx, contextKeyEnabledTypes, enabledTypes)
 		r = r.WithContext(ctx)
 

@@ -76,31 +76,6 @@ func (s *HeightStore) Update(network, node, endpointType string, height int64, l
 	metrics.AvgLatency = sum / time.Duration(len(metrics.LatencyHistory))
 }
 
-// Get retrieves the metrics for a specific node
-func (s *HeightStore) Get(network, node, endpointType string) (*NodeMetrics, bool) {
-	key := makeKey(network, node, endpointType)
-	metrics, ok := s.data.Load(key)
-	if !ok {
-		return nil, false
-	}
-
-	// Return a copy to prevent external modifications
-	metrics.mu.Lock()
-	defer metrics.mu.Unlock()
-
-	copy := &NodeMetrics{
-		Height:             metrics.Height,
-		Timestamp:          metrics.Timestamp,
-		Source:             metrics.Source,
-		LatencyHistory:     make([]time.Duration, len(metrics.LatencyHistory)),
-		AvgLatency:         metrics.AvgLatency,
-		WebSocketAvailable: metrics.WebSocketAvailable,
-	}
-	copyDurations(copy.LatencyHistory, metrics.LatencyHistory)
-
-	return copy, true
-}
-
 // GetByNetwork returns all nodes for a given network and endpoint type
 func (s *HeightStore) GetByNetwork(network, endpointType string) map[string]*NodeMetrics {
 	result := make(map[string]*NodeMetrics)
@@ -125,24 +100,6 @@ func (s *HeightStore) GetByNetwork(network, endpointType string) map[string]*Nod
 		return true
 	})
 
-	return result
-}
-
-// GetAllNetworks returns a list of all networks being monitored
-func (s *HeightStore) GetAllNetworks() []string {
-	networks := make(map[string]bool)
-
-	s.data.Range(func(keyStr string, _ *NodeMetrics) bool {
-		if network, _, _ := parseKey(keyStr); network != "" {
-			networks[network] = true
-		}
-		return true
-	})
-
-	result := make([]string, 0, len(networks))
-	for network := range networks {
-		result = append(result, network)
-	}
 	return result
 }
 
