@@ -34,8 +34,11 @@ type Server struct {
 	endpointStore *storage.ExternalEndpointStore
 	selector      *selector.Selector
 	statusServer  *http.Server
-	httpServers   []*http.Server // All HTTP proxy servers (API + RPC)
-	grpcServers   []*grpc.Server // All gRPC proxy servers
+	statusHandler *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
+	httpServers   []*http.Server     // All HTTP proxy servers (API + RPC)
+	grpcServers   []*grpc.Server     // All gRPC proxy servers
+	grpcProxies   []*proxy.GRPCProxy // All gRPC proxy instances (for Close)
+	errCh         chan error         // Fatal errors from background goroutines
 }
 
 // New creates a new Sauron server
@@ -92,6 +95,7 @@ func New(configPath string) (*Server, error) {
 		cache:         cache,
 		endpointStore: endpointStore,
 		selector:      sel,
+		errCh:         make(chan error, 10),
 	}, nil
 }
 
@@ -129,6 +133,7 @@ func (s *Server) startStatusServer(cfg *config.Config) error {
 	// Setup status routes
 	handler := status.NewHandler(s.selector, s.configLoader, s.logger)
 	handler.SetupRoutes(mux)
+	s.statusHandler = handler
 
 	s.statusServer = &http.Server{
 		Addr:    cfg.Listen,
@@ -138,7 +143,8 @@ func (s *Server) startStatusServer(cfg *config.Config) error {
 	go func() {
 		s.logger.Info("Status server starting", zap.String("addr", cfg.Listen))
 		if err := s.statusServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.logger.Fatal("Status server failed", zap.Error(err))
+			s.logger.Error("Status server failed", zap.Error(err))
+			s.errCh <- err
 		}
 	}()
 
@@ -163,7 +169,8 @@ func (s *Server) startNetworkProxies(cfg *config.Config) error {
 					zap.String("addr", addr),
 				)
 				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					s.logger.Fatal("API proxy failed", zap.String("network", netName), zap.Error(err))
+					s.logger.Error("API proxy failed", zap.String("network", netName), zap.Error(err))
+					s.errCh <- err
 				}
 			}(network.Name, network.APIListen)
 		}
@@ -183,7 +190,8 @@ func (s *Server) startNetworkProxies(cfg *config.Config) error {
 					zap.String("addr", addr),
 				)
 				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					s.logger.Fatal("RPC proxy failed", zap.String("network", netName), zap.Error(err))
+					s.logger.Error("RPC proxy failed", zap.String("network", netName), zap.Error(err))
+					s.errCh <- err
 				}
 			}(network.Name, network.RPCListen)
 		}
@@ -193,6 +201,7 @@ func (s *Server) startNetworkProxies(cfg *config.Config) error {
 			grpcProxy := proxy.NewGRPCProxy(s.selector, s.configLoader, s.endpointStore, s.logger, network.Name)
 			grpcServer := grpcProxy.GetServer()
 			s.grpcServers = append(s.grpcServers, grpcServer)
+			s.grpcProxies = append(s.grpcProxies, grpcProxy)
 
 			go func(netName, addr string) {
 				s.logger.Info("gRPC proxy starting",
@@ -203,15 +212,18 @@ func (s *Server) startNetworkProxies(cfg *config.Config) error {
 				// Create TCP listener
 				lis, err := net.Listen("tcp", addr)
 				if err != nil {
-					s.logger.Fatal("gRPC proxy failed to listen",
+					s.logger.Error("gRPC proxy failed to listen",
 						zap.String("network", netName),
 						zap.Error(err))
+					s.errCh <- err
+					return
 				}
 
 				if err := grpcServer.Serve(lis); err != nil {
-					s.logger.Fatal("gRPC proxy failed",
+					s.logger.Error("gRPC proxy failed",
 						zap.String("network", netName),
 						zap.Error(err))
+					s.errCh <- err
 				}
 			}(network.Name, network.GRPCListen)
 		}
@@ -220,13 +232,18 @@ func (s *Server) startNetworkProxies(cfg *config.Config) error {
 	return nil
 }
 
-// WaitForShutdown waits for shutdown signal and performs graceful shutdown
+// WaitForShutdown waits for a shutdown signal or a fatal error from a background
+// goroutine, then performs graceful shutdown.
 func (s *Server) WaitForShutdown() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	sig := <-sigCh
-	s.logger.Info("Shutdown signal received", zap.String("signal", sig.String()))
+	select {
+	case sig := <-sigCh:
+		s.logger.Info("Shutdown signal received", zap.String("signal", sig.String()))
+	case err := <-s.errCh:
+		s.logger.Error("Fatal error in background goroutine, initiating shutdown", zap.Error(err))
+	}
 
 	s.Shutdown()
 }
@@ -266,6 +283,20 @@ func (s *Server) Shutdown() {
 		grpcServer.GracefulStop()
 		s.logger.Info("gRPC proxy server shutdown successfully",
 			zap.Int("server_index", i))
+	}
+
+	// Close all gRPC proxy backend connection pools
+	for i, grpcProxy := range s.grpcProxies {
+		if err := grpcProxy.Close(); err != nil {
+			s.logger.Error("gRPC proxy close error",
+				zap.Int("proxy_index", i),
+				zap.Error(err))
+		}
+	}
+
+	// Stop the status handler's rate limiter goroutine
+	if s.statusHandler != nil {
+		s.statusHandler.Shutdown()
 	}
 
 	// Stop worker pool

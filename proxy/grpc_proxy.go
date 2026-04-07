@@ -67,8 +67,9 @@ type GRPCProxy struct {
 	network       string // The network this proxy serves
 
 	// Connection pool for backend connections (optimization)
-	connPool map[string]*grpc.ClientConn
-	connMu   sync.RWMutex
+	connPool  map[string]*grpc.ClientConn
+	connMu    sync.RWMutex
+	closeOnce sync.Once
 }
 
 // NewGRPCProxy creates a new gRPC proxy for a specific network
@@ -140,8 +141,18 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 	defer p.connMu.Unlock()
 
 	// Double-check after acquiring write lock
-	if conn, exists := p.connPool[targetAddr]; exists && conn.GetState().String() != "SHUTDOWN" {
-		return conn, nil
+	if conn, exists := p.connPool[targetAddr]; exists {
+		if conn.GetState().String() != "SHUTDOWN" {
+			return conn, nil
+		}
+		// Connection is in SHUTDOWN state — close it to release resources before replacing
+		if err := conn.Close(); err != nil {
+			p.logger.Warn("Failed to close SHUTDOWN gRPC connection",
+				zap.String("addr", targetAddr),
+				zap.Error(err),
+			)
+		}
+		delete(p.connPool, targetAddr)
 	}
 
 	// Create new connection with optimized settings
@@ -217,7 +228,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		return status.Errorf(codes.Internal, "failed to get method name")
 	}
 
-	p.logger.Info("gRPC proxy request received",
+	p.logger.Debug("gRPC proxy request received",
 		zap.String("method", method),
 		zap.String("network", p.network),
 	)
@@ -240,7 +251,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		return status.Errorf(codes.Internal, "failed to get endpoint")
 	}
 
-	p.logger.Info("gRPC routing decision made",
+	p.logger.Debug("gRPC routing decision made",
 		zap.String("network", p.network),
 		zap.String("selected_node", nodeName),
 		zap.String("target", targetAddr),
@@ -282,7 +293,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		return status.Errorf(codes.Internal, "failed to create stream: %v", err)
 	}
 
-	p.logger.Info("Proxying gRPC to backend",
+	p.logger.Debug("Proxying gRPC to backend",
 		zap.String("target", targetAddr),
 		zap.String("method", method),
 	)
@@ -379,7 +390,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		statusStr,
 	).Observe(duration.Seconds())
 
-	metrics.NodeRequests.WithLabelValues(p.network, nodeName, "grpc", method).Inc()
+	metrics.NodeRequests.WithLabelValues(p.network, nodeName, "grpc", normalizeGRPCMethod(method)).Inc()
 
 	if proxyErr != nil {
 		metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", statusStr, "proxy_error").Inc()
@@ -403,7 +414,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 			}
 		}
 	} else {
-		p.logger.Info("gRPC request completed",
+		p.logger.Debug("gRPC request completed",
 			zap.String("method", method),
 			zap.Duration("duration", duration),
 		)
@@ -420,17 +431,6 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	return proxyErr
 }
 
-// shouldUseInsecure determines if we should use insecure gRPC connection (network-level)
-func (p *GRPCProxy) shouldUseInsecure() bool {
-	cfg := p.configLoader.Get()
-	for _, network := range cfg.Networks {
-		if network.Name == p.network {
-			return network.GRPCInsecure
-		}
-	}
-	return false
-}
-
 // shouldUseInsecureForNode determines if we should use insecure connection for a specific node
 func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
 	cfg := p.configLoader.Get()
@@ -441,22 +441,43 @@ func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
 		}
 	}
 	// If node not found, fall back to network-level setting
-	return p.shouldUseInsecure()
-}
-
-// Close closes all pooled connections
-func (p *GRPCProxy) Close() error {
-	p.connMu.Lock()
-	defer p.connMu.Unlock()
-
-	for addr, conn := range p.connPool {
-		if err := conn.Close(); err != nil {
-			p.logger.Warn("Failed to close gRPC connection",
-				zap.String("addr", addr),
-				zap.Error(err),
-			)
+	for _, network := range cfg.Networks {
+		if network.Name == p.network {
+			return network.GRPCInsecure
 		}
 	}
-	p.connPool = make(map[string]*grpc.ClientConn)
-	return nil
+	return false
+}
+
+// normalizeGRPCMethod extracts the service name from a full gRPC method path.
+// "/package.Service/Method" → "package.Service"
+// Returns the input unchanged when the format is not recognised.
+func normalizeGRPCMethod(method string) string {
+	// Strip leading slash
+	s := strings.TrimPrefix(method, "/")
+	if idx := strings.LastIndex(s, "/"); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
+
+// Close closes all pooled connections. It is idempotent; subsequent calls are no-ops.
+func (p *GRPCProxy) Close() error {
+	var closeErr error
+	p.closeOnce.Do(func() {
+		p.connMu.Lock()
+		defer p.connMu.Unlock()
+
+		for addr, conn := range p.connPool {
+			if err := conn.Close(); err != nil {
+				p.logger.Warn("Failed to close gRPC connection",
+					zap.String("addr", addr),
+					zap.Error(err),
+				)
+				closeErr = err
+			}
+		}
+		p.connPool = make(map[string]*grpc.ClientConn)
+	})
+	return closeErr
 }
