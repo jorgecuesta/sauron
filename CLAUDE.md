@@ -213,7 +213,9 @@ Every code change must pass ALL of these before it is considered done:
 2. **Tests**: `go test ./...` — all pass
 3. **Race detector**: `go test -race ./...` — no races
 4. **Vet**: `go vet ./...` — no issues
-5. **Review**: Re-read the diff. Check for:
+5. **Lint**: `make lint` (golangci-lint) — no issues. This catches errcheck, staticcheck, unused, and other rules that go vet misses. MUST run before pushing.
+6. **Format**: `gofmt -l .` — no files listed
+7. **Review**: Re-read the diff. Check for:
    - Unused imports or variables
    - Hardcoded values that should be configurable
    - Missing error handling
@@ -223,6 +225,8 @@ Every code change must pass ALL of these before it is considered done:
    - Metric cardinality (no unbounded labels)
 
 If any gate fails, fix it before reporting completion. Do NOT report "done" with known failures.
+
+**No "pre-existing" excuses.** If a quality gate fails, fix it. Do not dismiss failures as "pre-existing" or "not related to my changes." The previous release passed all CI checks. If something fails now, either your change broke it or the environment drifted — either way, diagnose and fix it before moving on.
 
 ### Evidence-Based Reporting
 - When reporting a bug: show the file, line number, and why it's wrong.

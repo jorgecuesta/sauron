@@ -8,19 +8,30 @@ import (
 // Config represents the complete Sauron configuration
 // The Dark Tower's ancient scrolls
 type Config struct {
-	API                       bool       `mapstructure:"api"`
-	RPC                       bool       `mapstructure:"rpc"`
-	GRPC                      bool       `mapstructure:"grpc"`
-	Auth                      bool       `mapstructure:"auth"`
-	Listen                    string     `mapstructure:"listen"`
-	ExternalFailoverThreshold int64      `mapstructure:"external_failover_threshold"` // Blocks behind before using externals (default: 2)
-	Timeouts                  Timeouts   `mapstructure:"timeouts"`
-	Redis                     Redis      `mapstructure:"redis"`
-	RateLimit                 RateLimit  `mapstructure:"rate_limit"`
-	Networks                  []Network  `mapstructure:"networks"`
-	Internals                 []Node     `mapstructure:"internals"`
-	Externals                 []External `mapstructure:"externals"`
-	Users                     []User     `mapstructure:"users"`
+	API                       bool          `mapstructure:"api"`
+	RPC                       bool          `mapstructure:"rpc"`
+	GRPC                      bool          `mapstructure:"grpc"`
+	Auth                      bool          `mapstructure:"auth"`
+	Listen                    string        `mapstructure:"listen"`
+	ExternalFailoverThreshold int64         `mapstructure:"external_failover_threshold"` // Blocks behind before using externals (default: 2)
+	Timeouts                  Timeouts      `mapstructure:"timeouts"`
+	GRPCKeepalive             GRPCKeepalive `mapstructure:"grpc_keepalive"`
+	Redis                     Redis         `mapstructure:"redis"`
+	RateLimit                 RateLimit     `mapstructure:"rate_limit"`
+	Networks                  []Network     `mapstructure:"networks"`
+	Internals                 []Node        `mapstructure:"internals"`
+	Externals                 []External    `mapstructure:"externals"`
+	Users                     []User        `mapstructure:"users"`
+}
+
+// GRPCKeepalive configures the gRPC client keepalive parameters.
+// Controls how often Sauron pings backend gRPC servers to detect dead connections.
+// Time must be >= the server's MinPingTime (default 5m in Go gRPC) to avoid
+// ENHANCE_YOUR_CALM / too_many_pings rejection.
+type GRPCKeepalive struct {
+	Time                time.Duration `mapstructure:"time"`                  // How often to ping (default: 600s)
+	Timeout             time.Duration `mapstructure:"timeout"`               // Wait for ping ack (default: 20s)
+	PermitWithoutStream bool          `mapstructure:"permit_without_stream"` // Ping on idle connections (default: false)
 }
 
 // Timeouts configuration for health checks and proxying

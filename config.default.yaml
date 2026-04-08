@@ -23,6 +23,15 @@ timeouts:
   health_check: 5s  # How often to check node health
   proxy: 60s        # Timeout for proxied requests
 
+# gRPC client keepalive settings
+# Controls how often Sauron pings backend gRPC servers to detect dead connections.
+# 'time' must be >= the server's MinPingTime (default 5m in Go gRPC) to avoid
+# ENHANCE_YOUR_CALM / too_many_pings rejection from backends.
+grpc_keepalive:
+  time: 600s                  # Ping interval (default: 600s / 10 minutes)
+  timeout: 20s                # Wait for ping ACK before considering dead (default: 20s)
+  permit_without_stream: false # Send pings on idle connections (default: false)
+
 # Rate limiting for status API (optional)
 rate_limit:
   enabled: true

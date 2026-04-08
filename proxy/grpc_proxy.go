@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -171,7 +172,13 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 		maxSendSize = 100 * 1024 * 1024
 	}
 
-	conn, err := grpcutil.NewConnection(targetAddr, useInsecure,
+	ka := keepalive.ClientParameters{
+		Time:                cfg.GRPCKeepalive.Time,
+		Timeout:             cfg.GRPCKeepalive.Timeout,
+		PermitWithoutStream: cfg.GRPCKeepalive.PermitWithoutStream,
+	}
+
+	conn, err := grpcutil.NewConnection(targetAddr, useInsecure, ka,
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(maxRecvSize), // Use configured limit for backend connections
 			grpc.MaxCallSendMsgSize(maxSendSize), // Use configured limit for backend connections

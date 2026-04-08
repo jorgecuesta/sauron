@@ -38,8 +38,8 @@ func NewScheduler(
 	// Create checkers
 	apiChecker := NewAPIChecker(store, cache, logger)
 	rpcChecker := NewRPCChecker(store, cache, logger)
-	grpcChecker := NewGRPCChecker(store, cache, logger)
-	extChecker := NewExternalChecker(store, endpointStore, logger)
+	grpcChecker := NewGRPCChecker(store, cache, configLoader, logger)
+	extChecker := NewExternalChecker(store, endpointStore, configLoader, logger)
 
 	// Create cron with seconds support and panic recovery
 	cronScheduler := cron.New(

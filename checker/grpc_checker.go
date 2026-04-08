@@ -14,24 +14,27 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 // GRPCChecker checks node heights via CosmosSDK gRPC
 // The Eye speaking in the ancient protocols
 type GRPCChecker struct {
-	store       *storage.HeightStore
-	cache       *storage.Cache
-	logger      *zap.Logger
-	connections *xsync.Map[string, *grpc.ClientConn] // node name -> connection
+	store        *storage.HeightStore
+	cache        *storage.Cache
+	configLoader *config.Loader
+	logger       *zap.Logger
+	connections  *xsync.Map[string, *grpc.ClientConn] // node name -> connection
 }
 
 // NewGRPCChecker creates a new gRPC checker
-func NewGRPCChecker(store *storage.HeightStore, cache *storage.Cache, logger *zap.Logger) *GRPCChecker {
+func NewGRPCChecker(store *storage.HeightStore, cache *storage.Cache, configLoader *config.Loader, logger *zap.Logger) *GRPCChecker {
 	return &GRPCChecker{
-		store:       store,
-		cache:       cache,
-		logger:      logger,
-		connections: xsync.NewMap[string, *grpc.ClientConn](),
+		store:        store,
+		cache:        cache,
+		configLoader: configLoader,
+		logger:       logger,
+		connections:  xsync.NewMap[string, *grpc.ClientConn](),
 	}
 }
 
@@ -100,7 +103,14 @@ func (c *GRPCChecker) getConnection(node config.Node) (*grpc.ClientConn, error) 
 
 // createConnection dials gRPC and warms up the connection.
 func (c *GRPCChecker) createConnection(node config.Node) (*grpc.ClientConn, error) {
-	conn, err := grpcutil.NewConnection(node.GRPC, node.GRPCInsecure,
+	cfg := c.configLoader.Get()
+	ka := keepalive.ClientParameters{
+		Time:                cfg.GRPCKeepalive.Time,
+		Timeout:             cfg.GRPCKeepalive.Timeout,
+		PermitWithoutStream: cfg.GRPCKeepalive.PermitWithoutStream,
+	}
+
+	conn, err := grpcutil.NewConnection(node.GRPC, node.GRPCInsecure, ka,
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(100*1024*1024),
 			grpc.MaxCallSendMsgSize(100*1024*1024),

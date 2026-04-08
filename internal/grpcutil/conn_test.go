@@ -3,8 +3,11 @@ package grpcutil_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"sauron/internal/grpcutil"
+
+	"google.golang.org/grpc/keepalive"
 )
 
 // TestNewConnection_PassthroughResolver verifies that NewConnection correctly prepends
@@ -37,12 +40,18 @@ func TestNewConnection_PassthroughResolver(t *testing.T) {
 		},
 	}
 
+	ka := keepalive.ClientParameters{
+		Time:                600 * time.Second,
+		Timeout:             20 * time.Second,
+		PermitWithoutStream: false,
+	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// We can't easily inspect the resolved target after NewConnection returns
 			// a *grpc.ClientConn, but we can verify the logic by calling NewConnection
 			// and ensuring it does not error (connection is lazy, so no network call occurs).
-			conn, err := grpcutil.NewConnection(tc.target, true)
+			conn, err := grpcutil.NewConnection(tc.target, true, ka)
 			if err != nil {
 				t.Fatalf("NewConnection(%q, true) returned unexpected error: %v", tc.target, err)
 			}
@@ -67,8 +76,14 @@ func TestNewConnection_PassthroughResolver(t *testing.T) {
 
 // TestNewConnection_InsecureVsTLS verifies both credential paths don't error at dial time.
 func TestNewConnection_InsecureVsTLS(t *testing.T) {
+	ka := keepalive.ClientParameters{
+		Time:                600 * time.Second,
+		Timeout:             20 * time.Second,
+		PermitWithoutStream: false,
+	}
+
 	t.Run("insecure", func(t *testing.T) {
-		conn, err := grpcutil.NewConnection("localhost:50051", true)
+		conn, err := grpcutil.NewConnection("localhost:50051", true, ka)
 		if err != nil {
 			t.Fatalf("NewConnection insecure returned error: %v", err)
 		}
@@ -76,7 +91,7 @@ func TestNewConnection_InsecureVsTLS(t *testing.T) {
 	})
 
 	t.Run("TLS", func(t *testing.T) {
-		conn, err := grpcutil.NewConnection("localhost:50051", false)
+		conn, err := grpcutil.NewConnection("localhost:50051", false, ka)
 		if err != nil {
 			t.Fatalf("NewConnection TLS returned error: %v", err)
 		}

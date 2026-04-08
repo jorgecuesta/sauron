@@ -18,6 +18,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 // ExternalChecker queries other Sauron deployments (the Palantíri network)
@@ -25,6 +26,7 @@ import (
 type ExternalChecker struct {
 	store           *storage.HeightStore
 	endpointStore   *storage.ExternalEndpointStore
+	configLoader    *config.Loader
 	client          *http.Client
 	logger          *zap.Logger
 	grpcConnections *xsync.Map[string, *grpc.ClientConn] // url -> connection pool for external gRPC endpoints
@@ -41,10 +43,11 @@ type ExternalStatusResponse struct {
 }
 
 // NewExternalChecker creates a new external checker
-func NewExternalChecker(store *storage.HeightStore, endpointStore *storage.ExternalEndpointStore, logger *zap.Logger) *ExternalChecker {
+func NewExternalChecker(store *storage.HeightStore, endpointStore *storage.ExternalEndpointStore, configLoader *config.Loader, logger *zap.Logger) *ExternalChecker {
 	return &ExternalChecker{
 		store:         store,
 		endpointStore: endpointStore,
+		configLoader:  configLoader,
 		client: &http.Client{
 			Transport: &http.Transport{
 				MaxIdleConns:        ExternalHTTPMaxIdleConns,
@@ -339,7 +342,14 @@ func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc
 
 // createGRPCConnection dials gRPC and warms up the connection.
 func (c *ExternalChecker) createGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
-	conn, err := grpcutil.NewConnection(url, useInsecure,
+	cfg := c.configLoader.Get()
+	ka := keepalive.ClientParameters{
+		Time:                cfg.GRPCKeepalive.Time,
+		Timeout:             cfg.GRPCKeepalive.Timeout,
+		PermitWithoutStream: cfg.GRPCKeepalive.PermitWithoutStream,
+	}
+
+	conn, err := grpcutil.NewConnection(url, useInsecure, ka,
 		grpc.WithConnectParams(grpc.ConnectParams{
 			MinConnectTimeout: 10 * time.Second,
 		}),

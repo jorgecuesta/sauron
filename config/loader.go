@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -44,6 +45,8 @@ func NewLoader(configPath string, logger *zap.Logger) (*Loader, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	applyGRPCKeepaliveDefaults(&cfg)
+
 	l.config.Store(&cfg)
 	logger.Info("Configuration loaded successfully",
 		zap.String("path", configPath),
@@ -74,6 +77,8 @@ func (l *Loader) onConfigChange(e fsnotify.Event) {
 		return
 	}
 
+	applyGRPCKeepaliveDefaults(&newCfg)
+
 	l.config.Store(&newCfg)
 
 	l.logger.Info("Configuration reloaded successfully",
@@ -87,4 +92,15 @@ func (l *Loader) onConfigChange(e fsnotify.Event) {
 // The returned *Config is immutable — callers must not modify it.
 func (l *Loader) Get() *Config {
 	return l.config.Load()
+}
+
+// applyGRPCKeepaliveDefaults sets safe defaults for zero-valued keepalive fields.
+func applyGRPCKeepaliveDefaults(cfg *Config) {
+	if cfg.GRPCKeepalive.Time == 0 {
+		cfg.GRPCKeepalive.Time = 600 * time.Second // 10 minutes — safely above server's 5min MinPingTime
+	}
+	if cfg.GRPCKeepalive.Timeout == 0 {
+		cfg.GRPCKeepalive.Timeout = 20 * time.Second
+	}
+	// PermitWithoutStream defaults to false (zero value), which is what we want
 }

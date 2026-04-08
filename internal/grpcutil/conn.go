@@ -3,7 +3,6 @@ package grpcutil
 import (
 	"crypto/tls"
 	"strings"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -12,9 +11,9 @@ import (
 )
 
 // NewConnection creates a gRPC client connection with standard TLS/keepalive/passthrough config.
-// If insecureConn is true, no TLS is used. Extra dial options (e.g. message size limits,
-// raw codec) can be appended via extraOpts.
-func NewConnection(target string, insecureConn bool, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
+// If insecureConn is true, no TLS is used. The ka parameter configures keepalive ping behavior.
+// Extra dial options (e.g. message size limits, raw codec) can be appended via extraOpts.
+func NewConnection(target string, insecureConn bool, ka keepalive.ClientParameters, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	opts := make([]grpc.DialOption, 0, 2+len(extraOpts))
 
 	if insecureConn {
@@ -24,11 +23,7 @@ func NewConnection(target string, insecureConn bool, extraOpts ...grpc.DialOptio
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	}
 
-	opts = append(opts, grpc.WithKeepaliveParams(keepalive.ClientParameters{
-		Time:                10 * time.Second,
-		Timeout:             3 * time.Second,
-		PermitWithoutStream: true,
-	}))
+	opts = append(opts, grpc.WithKeepaliveParams(ka))
 
 	opts = append(opts, extraOpts...)
 
