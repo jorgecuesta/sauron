@@ -14,8 +14,8 @@ var knownChainTypes = map[string]bool{
 	"custom": true,
 }
 
-// ValidateV2 checks if a V2Config is valid.
-func ValidateV2(cfg *V2Config) error {
+// ValidateMultiChain checks if a MultiChainConfig is valid.
+func ValidateMultiChain(cfg *MultiChainConfig) error {
 	if cfg.Listen == "" {
 		return fmt.Errorf("listen address cannot be empty")
 	}
@@ -23,7 +23,7 @@ func ValidateV2(cfg *V2Config) error {
 		return err
 	}
 
-	if err := validateV2Timeouts(&cfg.Timeouts); err != nil {
+	if err := validateMultiChainTimeouts(&cfg.Timeouts); err != nil {
 		return err
 	}
 
@@ -44,7 +44,7 @@ func ValidateV2(cfg *V2Config) error {
 	listenAddrs := make(map[string]string) // address → network name
 
 	for i := range cfg.Networks {
-		if err := validateV2Network(&cfg.Networks[i], i, networkNames, listenAddrs); err != nil {
+		if err := validateMultiChainNetwork(&cfg.Networks[i], i, networkNames, listenAddrs); err != nil {
 			return err
 		}
 	}
@@ -55,7 +55,7 @@ func ValidateV2(cfg *V2Config) error {
 
 	// Build set of valid network names for node validation.
 	for i := range cfg.Internals {
-		if err := validateV2Node(&cfg.Internals[i], i, networkNames); err != nil {
+		if err := validateMultiChainNode(&cfg.Internals[i], i, networkNames); err != nil {
 			return err
 		}
 	}
@@ -70,7 +70,7 @@ func ValidateV2(cfg *V2Config) error {
 		return fmt.Errorf("at least one user must be configured when auth is enabled")
 	}
 	for i := range cfg.Users {
-		if err := validateV2User(&cfg.Users[i], i, networkNames); err != nil {
+		if err := validateMultiChainUser(&cfg.Users[i], i, networkNames); err != nil {
 			return err
 		}
 	}
@@ -78,7 +78,7 @@ func ValidateV2(cfg *V2Config) error {
 	return nil
 }
 
-func validateV2Timeouts(t *Timeouts) error {
+func validateMultiChainTimeouts(t *Timeouts) error {
 	if t.HealthCheck == 0 {
 		return fmt.Errorf("health_check timeout cannot be zero")
 	}
@@ -94,7 +94,7 @@ func validateV2Timeouts(t *Timeouts) error {
 	return nil
 }
 
-func validateV2Network(net *V2Network, index int, names map[string]bool, addrs map[string]string) error {
+func validateMultiChainNetwork(net *MultiChainNetwork, index int, names map[string]bool, addrs map[string]string) error {
 	if net.Name == "" {
 		return fmt.Errorf("network %d: name cannot be empty", index)
 	}
@@ -198,7 +198,7 @@ func validateV2Network(net *V2Network, index int, names map[string]bool, addrs m
 	return nil
 }
 
-func validateCustomHeightCheck(net *V2Network, index int) error {
+func validateCustomHeightCheck(net *MultiChainNetwork, index int) error {
 	if net.HeightCheck == nil {
 		return fmt.Errorf("network %d (%s): custom type requires height_check configuration", index, net.Name)
 	}
@@ -216,7 +216,7 @@ func validateCustomHeightCheck(net *V2Network, index int) error {
 	return nil
 }
 
-func validateV2Node(node *V2Node, index int, networkNames map[string]bool) error {
+func validateMultiChainNode(node *MultiChainNode, index int, networkNames map[string]bool) error {
 	if node.Name == "" {
 		return fmt.Errorf("internal node %d: name cannot be empty", index)
 	}
@@ -248,7 +248,7 @@ func validateV2Node(node *V2Node, index int, networkNames map[string]bool) error
 	return nil
 }
 
-func validateV2User(user *V2User, index int, networkNames map[string]bool) error {
+func validateMultiChainUser(user *MultiChainUser, index int, networkNames map[string]bool) error {
 	if user.Name == "" {
 		return fmt.Errorf("user %d: name cannot be empty", index)
 	}

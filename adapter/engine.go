@@ -11,7 +11,7 @@ import (
 )
 
 // Engine executes CheckConfig and HealthCheckConfig against nodes.
-// There is ONE engine — all chain types share it (V2 rule: one path, one implementation).
+// There is ONE engine — all chain types share it .
 type Engine struct {
 	client *http.Client
 }

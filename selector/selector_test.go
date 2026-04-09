@@ -720,7 +720,7 @@ func TestSelectorNoInternalsOnlyExternals(t *testing.T) {
 	}
 }
 
-// --- V2 HealthStore filtering tests ---
+// --- HealthStore filtering tests ---
 
 func TestSelector_HealthFilter_ExcludesUnhealthy(t *testing.T) {
 	logger := zap.NewNop()

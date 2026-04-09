@@ -15,8 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// testV2Setup creates all dependencies for V2Scheduler tests.
-func testV2Setup(t *testing.T, nodeURL string) (*V2Scheduler, *storage.HeightStore, *storage.HealthStore) {
+// testMultiChainSetup creates all dependencies for MultiChainScheduler tests.
+func testMultiChainSetup(t *testing.T, nodeURL string) (*MultiChainScheduler, *storage.HeightStore, *storage.HealthStore) {
 	t.Helper()
 
 	heightStore := storage.NewHeightStore()
@@ -69,12 +69,12 @@ internals:
 	// Use a synchronous pool (size 1) for test determinism.
 	pool := newTestPool()
 
-	sched := NewV2Scheduler(engine, registry, heightStore, healthStore, cache, endpointStore, loader, pool, zap.NewNop())
+	sched := NewMultiChainScheduler(engine, registry, heightStore, healthStore, cache, endpointStore, loader, pool, zap.NewNop())
 
 	return sched, heightStore, healthStore
 }
 
-func TestV2Scheduler_CheckInternalNodes_HeightCheck(t *testing.T) {
+func TestMultiChainScheduler_CheckInternalNodes_HeightCheck(t *testing.T) {
 	t.Parallel()
 
 	// Mock a Cosmos RPC /status response.
@@ -92,7 +92,7 @@ func TestV2Scheduler_CheckInternalNodes_HeightCheck(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sched, heightStore, healthStore := testV2Setup(t, srv.URL)
+	sched, heightStore, healthStore := testMultiChainSetup(t, srv.URL)
 
 	// Run height checks directly.
 	sched.checkInternalNodes()
@@ -122,7 +122,7 @@ func TestV2Scheduler_CheckInternalNodes_HeightCheck(t *testing.T) {
 	}
 }
 
-func TestV2Scheduler_CheckInternalNodes_HeightCheckFailed(t *testing.T) {
+func TestMultiChainScheduler_CheckInternalNodes_HeightCheckFailed(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -131,7 +131,7 @@ func TestV2Scheduler_CheckInternalNodes_HeightCheckFailed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sched, _, healthStore := testV2Setup(t, srv.URL)
+	sched, _, healthStore := testMultiChainSetup(t, srv.URL)
 
 	sched.checkInternalNodes()
 	drainTestPool(sched.pool)
@@ -149,7 +149,7 @@ func TestV2Scheduler_CheckInternalNodes_HeightCheckFailed(t *testing.T) {
 	}
 }
 
-func TestV2Scheduler_CheckInternalNodes_HealthCheck(t *testing.T) {
+func TestMultiChainScheduler_CheckInternalNodes_HealthCheck(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +167,7 @@ func TestV2Scheduler_CheckInternalNodes_HealthCheck(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sched, _, healthStore := testV2Setup(t, srv.URL)
+	sched, _, healthStore := testMultiChainSetup(t, srv.URL)
 
 	sched.checkInternalNodes()
 	drainTestPool(sched.pool)
@@ -178,7 +178,7 @@ func TestV2Scheduler_CheckInternalNodes_HealthCheck(t *testing.T) {
 	}
 }
 
-func TestV2Scheduler_CheckInternalNodes_HealthCheckFailed(t *testing.T) {
+func TestMultiChainScheduler_CheckInternalNodes_HealthCheckFailed(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +195,7 @@ func TestV2Scheduler_CheckInternalNodes_HealthCheckFailed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sched, _, healthStore := testV2Setup(t, srv.URL)
+	sched, _, healthStore := testMultiChainSetup(t, srv.URL)
 
 	sched.checkInternalNodes()
 	drainTestPool(sched.pool)
@@ -211,7 +211,7 @@ func TestV2Scheduler_CheckInternalNodes_HealthCheckFailed(t *testing.T) {
 	}
 }
 
-func TestV2Scheduler_StartStop(t *testing.T) {
+func TestMultiChainScheduler_StartStop(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -220,7 +220,7 @@ func TestV2Scheduler_StartStop(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sched, _, _ := testV2Setup(t, srv.URL)
+	sched, _, _ := testMultiChainSetup(t, srv.URL)
 
 	if err := sched.Start(); err != nil {
 		t.Fatalf("start: %v", err)

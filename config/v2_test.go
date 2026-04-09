@@ -5,29 +5,29 @@ import (
 	"time"
 )
 
-// validV2Config returns a minimal valid V2Config for testing.
+// validMultiChainConfig returns a minimal valid MultiChainConfig for testing.
 // Tests should modify specific fields to test validation.
-func validV2Config() V2Config {
-	return V2Config{
+func validMultiChainConfig() MultiChainConfig {
+	return MultiChainConfig{
 		Listen: ":3000",
 		Timeouts: Timeouts{
 			HealthCheck: 5 * time.Second,
 			Proxy:       60 * time.Second,
 		},
-		Networks: []V2Network{
+		Networks: []MultiChainNetwork{
 			{
 				Name: "pocket",
 				Type: "cosmos",
-				HeightCheck: &V2HeightCheck{
+				HeightCheck: &HeightCheckConfig{
 					Protocol: "rpc",
 					Interval: 30 * time.Second,
 				},
-				Endpoints: []V2Endpoint{
+				Endpoints: []NetworkEndpoint{
 					{Protocol: "rpc", Listen: ":8081"},
 				},
 			},
 		},
-		Internals: []V2Node{
+		Internals: []MultiChainNode{
 			{
 				Name:    "seed-one",
 				Network: "pocket",
@@ -39,17 +39,17 @@ func validV2Config() V2Config {
 	}
 }
 
-func TestValidateV2_ValidMinimal(t *testing.T) {
+func TestValidateMultiChain_ValidMinimal(t *testing.T) {
 	t.Parallel()
-	cfg := validV2Config()
-	if err := ValidateV2(&cfg); err != nil {
+	cfg := validMultiChainConfig()
+	if err := ValidateMultiChain(&cfg); err != nil {
 		t.Fatalf("expected valid, got error: %v", err)
 	}
 }
 
-func TestValidateV2_ValidFull(t *testing.T) {
+func TestValidateMultiChain_ValidFull(t *testing.T) {
 	t.Parallel()
-	cfg := V2Config{
+	cfg := MultiChainConfig{
 		Listen: ":3000",
 		Auth:   true,
 		Timeouts: Timeouts{
@@ -64,15 +64,15 @@ func TestValidateV2_ValidFull(t *testing.T) {
 			Enabled: true,
 			URI:     "redis://localhost:6379",
 		},
-		Networks: []V2Network{
+		Networks: []MultiChainNetwork{
 			{
 				Name: "pocket",
 				Type: "cosmos",
-				HeightCheck: &V2HeightCheck{
+				HeightCheck: &HeightCheckConfig{
 					Protocol: "rpc",
 					Interval: 30 * time.Second,
 				},
-				Endpoints: []V2Endpoint{
+				Endpoints: []NetworkEndpoint{
 					{Protocol: "rest", Listen: ":8080", Advertise: "https://sauron-api.example.com"},
 					{Protocol: "rpc", Listen: ":8081", Advertise: "https://sauron-rpc.example.com"},
 					{Protocol: "grpc", Listen: ":8082", Advertise: "sauron-grpc.example.com:9090"},
@@ -82,17 +82,17 @@ func TestValidateV2_ValidFull(t *testing.T) {
 				Name: "ethereum",
 				Type: "evm",
 				Mode: "finalized",
-				Endpoints: []V2Endpoint{
+				Endpoints: []NetworkEndpoint{
 					{Protocol: "jsonrpc", Listen: ":9080"},
 				},
-				Sync: &V2SyncCheck{
+				Sync: &SyncCheck{
 					MaxDrift:      5,
 					CheckInterval: 30 * time.Second,
-					Oracles:       []V2Oracle{{URL: "https://rpc.ankr.com/eth"}},
+					Oracles:       []SyncOracle{{URL: "https://rpc.ankr.com/eth"}},
 				},
 			},
 		},
-		Internals: []V2Node{
+		Internals: []MultiChainNode{
 			{
 				Name:    "seed-one",
 				Network: "pocket",
@@ -118,11 +118,11 @@ func TestValidateV2_ValidFull(t *testing.T) {
 				Rings: []string{"https://sauron-west:3000"},
 			},
 		},
-		Users: []V2User{
+		Users: []MultiChainUser{
 			{
 				Name:  "indexer",
 				Token: "idx-token",
-				Permissions: V2Permissions{
+				Permissions: MultiChainPermissions{
 					Networks: map[string]map[string]bool{
 						"pocket":   {"rest": true, "rpc": true},
 						"ethereum": {"jsonrpc": true},
@@ -132,149 +132,149 @@ func TestValidateV2_ValidFull(t *testing.T) {
 			{
 				Name:        "admin",
 				Token:       "admin-token",
-				Permissions: V2Permissions{All: true},
+				Permissions: MultiChainPermissions{All: true},
 			},
 		},
 	}
-	if err := ValidateV2(&cfg); err != nil {
+	if err := ValidateMultiChain(&cfg); err != nil {
 		t.Fatalf("expected valid, got error: %v", err)
 	}
 }
 
-func TestValidateV2_Errors(t *testing.T) {
+func TestValidateMultiChain_Errors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name   string
-		modify func(*V2Config)
+		modify func(*MultiChainConfig)
 		errMsg string
 	}{
 		// Top-level.
 		{
 			name:   "empty listen",
-			modify: func(c *V2Config) { c.Listen = "" },
+			modify: func(c *MultiChainConfig) { c.Listen = "" },
 			errMsg: "listen address cannot be empty",
 		},
 		{
 			name:   "invalid listen format",
-			modify: func(c *V2Config) { c.Listen = "badformat" },
+			modify: func(c *MultiChainConfig) { c.Listen = "badformat" },
 			errMsg: "invalid listen format",
 		},
 
 		// Timeouts.
 		{
 			name:   "zero health check timeout",
-			modify: func(c *V2Config) { c.Timeouts.HealthCheck = 0 },
+			modify: func(c *MultiChainConfig) { c.Timeouts.HealthCheck = 0 },
 			errMsg: "health_check timeout cannot be zero",
 		},
 		{
 			name:   "short health check timeout",
-			modify: func(c *V2Config) { c.Timeouts.HealthCheck = 500 * time.Millisecond },
+			modify: func(c *MultiChainConfig) { c.Timeouts.HealthCheck = 500 * time.Millisecond },
 			errMsg: "health_check timeout too short",
 		},
 		{
 			name:   "zero proxy timeout",
-			modify: func(c *V2Config) { c.Timeouts.Proxy = 0 },
+			modify: func(c *MultiChainConfig) { c.Timeouts.Proxy = 0 },
 			errMsg: "proxy timeout cannot be zero",
 		},
 		{
 			name:   "short proxy timeout",
-			modify: func(c *V2Config) { c.Timeouts.Proxy = 100 * time.Millisecond },
+			modify: func(c *MultiChainConfig) { c.Timeouts.Proxy = 100 * time.Millisecond },
 			errMsg: "proxy timeout too short",
 		},
 
 		// Redis.
 		{
 			name:   "redis enabled without URI",
-			modify: func(c *V2Config) { c.Redis = Redis{Enabled: true} },
+			modify: func(c *MultiChainConfig) { c.Redis = Redis{Enabled: true} },
 			errMsg: "redis URI cannot be empty",
 		},
 		{
 			name:   "redis bad URI",
-			modify: func(c *V2Config) { c.Redis = Redis{Enabled: true, URI: "tcp://bad"} },
+			modify: func(c *MultiChainConfig) { c.Redis = Redis{Enabled: true, URI: "tcp://bad"} },
 			errMsg: "invalid redis URI format",
 		},
 
 		// Networks.
 		{
 			name:   "no networks",
-			modify: func(c *V2Config) { c.Networks = nil },
+			modify: func(c *MultiChainConfig) { c.Networks = nil },
 			errMsg: "at least one network must be configured",
 		},
 		{
 			name:   "empty network name",
-			modify: func(c *V2Config) { c.Networks[0].Name = "" },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Name = "" },
 			errMsg: "name cannot be empty",
 		},
 		{
 			name: "duplicate network name",
-			modify: func(c *V2Config) {
-				c.Networks = append(c.Networks, V2Network{
+			modify: func(c *MultiChainConfig) {
+				c.Networks = append(c.Networks, MultiChainNetwork{
 					Name: "pocket", Type: "cosmos",
-					Endpoints: []V2Endpoint{{Protocol: "rpc", Listen: ":9999"}},
+					Endpoints: []NetworkEndpoint{{Protocol: "rpc", Listen: ":9999"}},
 				})
 			},
 			errMsg: "duplicate network name",
 		},
 		{
 			name:   "empty network type",
-			modify: func(c *V2Config) { c.Networks[0].Type = "" },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Type = "" },
 			errMsg: "type cannot be empty",
 		},
 		{
 			name:   "unknown network type",
-			modify: func(c *V2Config) { c.Networks[0].Type = "bitcoin" },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Type = "bitcoin" },
 			errMsg: "unknown chain type",
 		},
 		{
 			name:   "no endpoints",
-			modify: func(c *V2Config) { c.Networks[0].Endpoints = nil },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Endpoints = nil },
 			errMsg: "at least one endpoint must be configured",
 		},
 		{
 			name:   "empty endpoint protocol",
-			modify: func(c *V2Config) { c.Networks[0].Endpoints[0].Protocol = "" },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Endpoints[0].Protocol = "" },
 			errMsg: "protocol cannot be empty",
 		},
 		{
 			name: "duplicate endpoint protocol",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Endpoints = append(c.Networks[0].Endpoints,
-					V2Endpoint{Protocol: "rpc", Listen: ":9999"})
+					NetworkEndpoint{Protocol: "rpc", Listen: ":9999"})
 			},
 			errMsg: "duplicate endpoint protocol",
 		},
 		{
 			name:   "empty endpoint listen",
-			modify: func(c *V2Config) { c.Networks[0].Endpoints[0].Listen = "" },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Endpoints[0].Listen = "" },
 			errMsg: "listen address cannot be empty",
 		},
 		{
 			name:   "invalid endpoint listen",
-			modify: func(c *V2Config) { c.Networks[0].Endpoints[0].Listen = "bad" },
+			modify: func(c *MultiChainConfig) { c.Networks[0].Endpoints[0].Listen = "bad" },
 			errMsg: "invalid listen format",
 		},
 		{
 			name: "conflicting listen addresses",
-			modify: func(c *V2Config) {
-				c.Networks = append(c.Networks, V2Network{
+			modify: func(c *MultiChainConfig) {
+				c.Networks = append(c.Networks, MultiChainNetwork{
 					Name: "other", Type: "cosmos",
-					Endpoints: []V2Endpoint{{Protocol: "rpc", Listen: ":8081"}},
+					Endpoints: []NetworkEndpoint{{Protocol: "rpc", Listen: ":8081"}},
 				})
 			},
 			errMsg: "conflicts with network",
 		},
 		{
 			name: "invalid advertise URL",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Endpoints[0].Advertise = "not a url %%"
 			},
 			errMsg: "invalid",
 		},
 		{
 			name: "grpc advertise without port",
-			modify: func(c *V2Config) {
-				c.Networks[0].Endpoints = []V2Endpoint{
+			modify: func(c *MultiChainConfig) {
+				c.Networks[0].Endpoints = []NetworkEndpoint{
 					{Protocol: "grpc", Listen: ":8082", Advertise: "example.com"},
 				}
 			},
@@ -284,7 +284,7 @@ func TestValidateV2_Errors(t *testing.T) {
 		// Height check interval.
 		{
 			name: "height check interval too short",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].HeightCheck.Interval = 100 * time.Millisecond
 			},
 			errMsg: "height_check interval too short",
@@ -293,7 +293,7 @@ func TestValidateV2_Errors(t *testing.T) {
 		// EVM mode.
 		{
 			name: "invalid evm mode",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Type = "evm"
 				c.Networks[0].Mode = "invalid"
 			},
@@ -303,7 +303,7 @@ func TestValidateV2_Errors(t *testing.T) {
 		// Custom type.
 		{
 			name: "custom without height_check",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Type = "custom"
 				c.Networks[0].HeightCheck = nil
 			},
@@ -311,25 +311,25 @@ func TestValidateV2_Errors(t *testing.T) {
 		},
 		{
 			name: "custom without response_path",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Type = "custom"
-				c.Networks[0].HeightCheck = &V2HeightCheck{Method: "GET"}
+				c.Networks[0].HeightCheck = &HeightCheckConfig{Method: "GET"}
 			},
 			errMsg: "custom height_check requires response_path",
 		},
 		{
 			name: "custom without method",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Type = "custom"
-				c.Networks[0].HeightCheck = &V2HeightCheck{ResponsePath: ".height"}
+				c.Networks[0].HeightCheck = &HeightCheckConfig{ResponsePath: ".height"}
 			},
 			errMsg: "custom height_check requires method",
 		},
 		{
 			name: "custom invalid response_format",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Networks[0].Type = "custom"
-				c.Networks[0].HeightCheck = &V2HeightCheck{
+				c.Networks[0].HeightCheck = &HeightCheckConfig{
 					Method: "GET", ResponsePath: ".height", ResponseFormat: "binary",
 				}
 			},
@@ -339,22 +339,22 @@ func TestValidateV2_Errors(t *testing.T) {
 		// Sync.
 		{
 			name: "sync zero max_drift",
-			modify: func(c *V2Config) {
-				c.Networks[0].Sync = &V2SyncCheck{MaxDrift: 0, Oracles: []V2Oracle{{URL: "http://x"}}}
+			modify: func(c *MultiChainConfig) {
+				c.Networks[0].Sync = &SyncCheck{MaxDrift: 0, Oracles: []SyncOracle{{URL: "http://x"}}}
 			},
 			errMsg: "sync max_drift must be positive",
 		},
 		{
 			name: "sync no oracles",
-			modify: func(c *V2Config) {
-				c.Networks[0].Sync = &V2SyncCheck{MaxDrift: 5}
+			modify: func(c *MultiChainConfig) {
+				c.Networks[0].Sync = &SyncCheck{MaxDrift: 5}
 			},
 			errMsg: "sync requires at least one oracle",
 		},
 		{
 			name: "sync oracle empty URL",
-			modify: func(c *V2Config) {
-				c.Networks[0].Sync = &V2SyncCheck{MaxDrift: 5, Oracles: []V2Oracle{{URL: ""}}}
+			modify: func(c *MultiChainConfig) {
+				c.Networks[0].Sync = &SyncCheck{MaxDrift: 5, Oracles: []SyncOracle{{URL: ""}}}
 			},
 			errMsg: "URL cannot be empty",
 		},
@@ -362,8 +362,8 @@ func TestValidateV2_Errors(t *testing.T) {
 		// Archival.
 		{
 			name: "archival negative min_height",
-			modify: func(c *V2Config) {
-				c.Networks[0].Archival = &V2ArchivalCheck{MinHeight: -1}
+			modify: func(c *MultiChainConfig) {
+				c.Networks[0].Archival = &ArchivalCheck{MinHeight: -1}
 			},
 			errMsg: "archival min_height cannot be negative",
 		},
@@ -371,39 +371,39 @@ func TestValidateV2_Errors(t *testing.T) {
 		// Nodes.
 		{
 			name:   "no nodes or externals",
-			modify: func(c *V2Config) { c.Internals = nil; c.Externals = nil },
+			modify: func(c *MultiChainConfig) { c.Internals = nil; c.Externals = nil },
 			errMsg: "at least one internal node or external ring",
 		},
 		{
 			name:   "node empty name",
-			modify: func(c *V2Config) { c.Internals[0].Name = "" },
+			modify: func(c *MultiChainConfig) { c.Internals[0].Name = "" },
 			errMsg: "name cannot be empty",
 		},
 		{
 			name:   "node empty network",
-			modify: func(c *V2Config) { c.Internals[0].Network = "" },
+			modify: func(c *MultiChainConfig) { c.Internals[0].Network = "" },
 			errMsg: "network cannot be empty",
 		},
 		{
 			name:   "node unknown network",
-			modify: func(c *V2Config) { c.Internals[0].Network = "unknown" },
+			modify: func(c *MultiChainConfig) { c.Internals[0].Network = "unknown" },
 			errMsg: "references unknown network",
 		},
 		{
 			name:   "node no endpoints",
-			modify: func(c *V2Config) { c.Internals[0].Endpoints = nil },
+			modify: func(c *MultiChainConfig) { c.Internals[0].Endpoints = nil },
 			errMsg: "at least one endpoint must be configured",
 		},
 		{
 			name: "node empty endpoint URL",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Internals[0].Endpoints = map[string]string{"rpc": ""}
 			},
 			errMsg: "URL cannot be empty",
 		},
 		{
 			name: "node grpc without port",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Internals[0].Endpoints = map[string]string{"grpc": "seed-one"}
 			},
 			errMsg: "grpc endpoint must include port",
@@ -412,7 +412,7 @@ func TestValidateV2_Errors(t *testing.T) {
 		// Users.
 		{
 			name: "auth without users",
-			modify: func(c *V2Config) {
+			modify: func(c *MultiChainConfig) {
 				c.Auth = true
 				c.Users = nil
 			},
@@ -420,32 +420,32 @@ func TestValidateV2_Errors(t *testing.T) {
 		},
 		{
 			name: "user empty name",
-			modify: func(c *V2Config) {
-				c.Users = []V2User{{Token: "t", Permissions: V2Permissions{All: true}}}
+			modify: func(c *MultiChainConfig) {
+				c.Users = []MultiChainUser{{Token: "t", Permissions: MultiChainPermissions{All: true}}}
 			},
 			errMsg: "name cannot be empty",
 		},
 		{
 			name: "user empty token",
-			modify: func(c *V2Config) {
-				c.Users = []V2User{{Name: "u", Permissions: V2Permissions{All: true}}}
+			modify: func(c *MultiChainConfig) {
+				c.Users = []MultiChainUser{{Name: "u", Permissions: MultiChainPermissions{All: true}}}
 			},
 			errMsg: "token cannot be empty",
 		},
 		{
 			name: "user no permissions",
-			modify: func(c *V2Config) {
-				c.Users = []V2User{{Name: "u", Token: "t"}}
+			modify: func(c *MultiChainConfig) {
+				c.Users = []MultiChainUser{{Name: "u", Token: "t"}}
 			},
 			errMsg: "permissions must be",
 		},
 		{
 			name: "user unknown network in permissions",
-			modify: func(c *V2Config) {
-				c.Users = []V2User{{
+			modify: func(c *MultiChainConfig) {
+				c.Users = []MultiChainUser{{
 					Name:  "u",
 					Token: "t",
-					Permissions: V2Permissions{
+					Permissions: MultiChainPermissions{
 						Networks: map[string]map[string]bool{
 							"nonexistent": {"rpc": true},
 						},
@@ -459,9 +459,9 @@ func TestValidateV2_Errors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := validV2Config()
+			cfg := validMultiChainConfig()
 			tt.modify(&cfg)
-			err := ValidateV2(&cfg)
+			err := ValidateMultiChain(&cfg)
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.errMsg)
 			}
@@ -472,33 +472,33 @@ func TestValidateV2_Errors(t *testing.T) {
 	}
 }
 
-func TestV2Permissions_HasAccess(t *testing.T) {
+func TestMultiChainPermissions_HasAccess(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		perms    V2Permissions
+		perms    MultiChainPermissions
 		network  string
 		protocol string
 		want     bool
 	}{
 		{
 			name:     "all access",
-			perms:    V2Permissions{All: true},
+			perms:    MultiChainPermissions{All: true},
 			network:  "pocket",
 			protocol: "rpc",
 			want:     true,
 		},
 		{
 			name:     "all access any network",
-			perms:    V2Permissions{All: true},
+			perms:    MultiChainPermissions{All: true},
 			network:  "ethereum",
 			protocol: "jsonrpc",
 			want:     true,
 		},
 		{
 			name: "specific access granted",
-			perms: V2Permissions{
+			perms: MultiChainPermissions{
 				Networks: map[string]map[string]bool{
 					"pocket": {"rpc": true, "rest": true},
 				},
@@ -509,7 +509,7 @@ func TestV2Permissions_HasAccess(t *testing.T) {
 		},
 		{
 			name: "specific access denied protocol",
-			perms: V2Permissions{
+			perms: MultiChainPermissions{
 				Networks: map[string]map[string]bool{
 					"pocket": {"rpc": true},
 				},
@@ -520,7 +520,7 @@ func TestV2Permissions_HasAccess(t *testing.T) {
 		},
 		{
 			name: "specific access denied network",
-			perms: V2Permissions{
+			perms: MultiChainPermissions{
 				Networks: map[string]map[string]bool{
 					"pocket": {"rpc": true},
 				},
@@ -531,14 +531,14 @@ func TestV2Permissions_HasAccess(t *testing.T) {
 		},
 		{
 			name:     "nil networks",
-			perms:    V2Permissions{},
+			perms:    MultiChainPermissions{},
 			network:  "pocket",
 			protocol: "rpc",
 			want:     false,
 		},
 		{
 			name: "explicit false",
-			perms: V2Permissions{
+			perms: MultiChainPermissions{
 				Networks: map[string]map[string]bool{
 					"pocket": {"rpc": false},
 				},
@@ -560,12 +560,12 @@ func TestV2Permissions_HasAccess(t *testing.T) {
 	}
 }
 
-func TestV2Config_FindV2Network(t *testing.T) {
+func TestMultiChainConfig_FindNetwork(t *testing.T) {
 	t.Parallel()
-	cfg := validV2Config()
+	cfg := validMultiChainConfig()
 
 	// Found.
-	net := cfg.FindV2Network("pocket")
+	net := cfg.FindNetwork("pocket")
 	if net == nil {
 		t.Fatal("expected to find network 'pocket'")
 	}
@@ -574,22 +574,22 @@ func TestV2Config_FindV2Network(t *testing.T) {
 	}
 
 	// Not found.
-	if cfg.FindV2Network("nonexistent") != nil {
+	if cfg.FindNetwork("nonexistent") != nil {
 		t.Fatal("expected nil for unknown network")
 	}
 }
 
-func TestV2Config_FindV2User(t *testing.T) {
+func TestMultiChainConfig_FindUser(t *testing.T) {
 	t.Parallel()
-	cfg := V2Config{
-		Users: []V2User{
-			{Name: "alice", Token: "token-a", Permissions: V2Permissions{All: true}},
-			{Name: "bob", Token: "token-b", Permissions: V2Permissions{All: true}},
+	cfg := MultiChainConfig{
+		Users: []MultiChainUser{
+			{Name: "alice", Token: "token-a", Permissions: MultiChainPermissions{All: true}},
+			{Name: "bob", Token: "token-b", Permissions: MultiChainPermissions{All: true}},
 		},
 	}
 
 	// Found.
-	user := cfg.FindV2User("token-a")
+	user := cfg.FindUser("token-a")
 	if user == nil {
 		t.Fatal("expected to find user 'alice'")
 	}
@@ -598,32 +598,32 @@ func TestV2Config_FindV2User(t *testing.T) {
 	}
 
 	// Found second user.
-	user = cfg.FindV2User("token-b")
+	user = cfg.FindUser("token-b")
 	if user == nil || user.Name != "bob" {
 		t.Fatal("expected to find user 'bob'")
 	}
 
 	// Not found.
-	if cfg.FindV2User("wrong-token") != nil {
+	if cfg.FindUser("wrong-token") != nil {
 		t.Fatal("expected nil for wrong token")
 	}
 
 	// Empty token.
-	if cfg.FindV2User("") != nil {
+	if cfg.FindUser("") != nil {
 		t.Fatal("expected nil for empty token")
 	}
 }
 
-func TestV2Network_FindV2Endpoint(t *testing.T) {
+func TestMultiChainNetwork_FindEndpoint(t *testing.T) {
 	t.Parallel()
-	net := V2Network{
-		Endpoints: []V2Endpoint{
+	net := MultiChainNetwork{
+		Endpoints: []NetworkEndpoint{
 			{Protocol: "rest", Listen: ":8080"},
 			{Protocol: "rpc", Listen: ":8081"},
 		},
 	}
 
-	ep := net.FindV2Endpoint("rpc")
+	ep := net.FindEndpoint("rpc")
 	if ep == nil {
 		t.Fatal("expected to find endpoint 'rpc'")
 	}
@@ -631,28 +631,28 @@ func TestV2Network_FindV2Endpoint(t *testing.T) {
 		t.Fatalf("got %q, want %q", ep.Listen, ":8081")
 	}
 
-	if net.FindV2Endpoint("grpc") != nil {
+	if net.FindEndpoint("grpc") != nil {
 		t.Fatal("expected nil for missing protocol")
 	}
 }
 
-func TestV2Network_HeightCheckInterval(t *testing.T) {
+func TestMultiChainNetwork_HeightCheckInterval(t *testing.T) {
 	t.Parallel()
 
 	// Default.
-	net := V2Network{}
+	net := MultiChainNetwork{}
 	if got := net.HeightCheckInterval(); got != 30*time.Second {
 		t.Fatalf("default interval: got %v, want 30s", got)
 	}
 
 	// Custom.
-	net = V2Network{HeightCheck: &V2HeightCheck{Interval: 12 * time.Second}}
+	net = MultiChainNetwork{HeightCheck: &HeightCheckConfig{Interval: 12 * time.Second}}
 	if got := net.HeightCheckInterval(); got != 12*time.Second {
 		t.Fatalf("custom interval: got %v, want 12s", got)
 	}
 
 	// Zero uses default.
-	net = V2Network{HeightCheck: &V2HeightCheck{Interval: 0}}
+	net = MultiChainNetwork{HeightCheck: &HeightCheckConfig{Interval: 0}}
 	if got := net.HeightCheckInterval(); got != 30*time.Second {
 		t.Fatalf("zero interval: got %v, want 30s", got)
 	}

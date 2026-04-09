@@ -18,10 +18,10 @@ import (
 // The Dark Lord's judgment - highest height → round-robin distribution
 type Selector struct {
 	store          *storage.HeightStore
-	healthStore    *storage.HealthStore // Optional: if set, filters by protocol health (V2)
+	healthStore    *storage.HealthStore // Optional: if set, filters by protocol health
 	endpointStore  *storage.ExternalEndpointStore
-	archivalFilter *ArchivalFilter // Optional: V2 archival node filtering
-	syncFilter     *SyncFilter     // Optional: V2 oracle drift filtering
+	archivalFilter *ArchivalFilter // Optional: archival node filtering
+	syncFilter     *SyncFilter     // Optional: oracle drift filtering
 	configLoader   *config.Loader
 	logger         *zap.Logger
 	rrCounters     sync.Map // map[string]*uint64 — per "network:type" round-robin counter
@@ -52,18 +52,18 @@ func NewSelector(store *storage.HeightStore, endpointStore *storage.ExternalEndp
 	}
 }
 
-// SetHealthStore enables V2 health-based filtering.
+// SetHealthStore enables health-based filtering.
 // When set, nodes whose protocol endpoint is unhealthy are excluded from selection.
 func (s *Selector) SetHealthStore(hs *storage.HealthStore) {
 	s.healthStore = hs
 }
 
-// SetArchivalFilter enables V2 archival node filtering.
+// SetArchivalFilter enables archival node filtering.
 func (s *Selector) SetArchivalFilter(f *ArchivalFilter) {
 	s.archivalFilter = f
 }
 
-// SetSyncFilter enables V2 oracle drift filtering.
+// SetSyncFilter enables oracle drift filtering.
 func (s *Selector) SetSyncFilter(f *SyncFilter) {
 	s.syncFilter = f
 }
@@ -86,7 +86,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		zap.Int("count", len(nodes)),
 	)
 
-	// V2: filter by protocol health if HealthStore is available.
+	// Filter by protocol health if HealthStore is available.
 	if s.healthStore != nil {
 		filtered := make([]nodeWithName, 0, len(nodes))
 		for _, n := range nodes {
@@ -102,10 +102,10 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		nodes = filtered
 	}
 
-	// V2 step 4: filter by archival status if configured.
+	// Filter by archival status if configured.
 	nodes = s.archivalFilter.Filter(network, nodes)
 
-	// V2 step 5: filter by sync/oracle drift if configured.
+	// Filter by sync/oracle drift if configured.
 	nodes = s.syncFilter.Filter(network, nodes)
 
 	// Find max internal height

@@ -32,14 +32,14 @@ type Server struct {
 	pool          pond.Pool
 	scheduler     *checker.Scheduler
 	store         *storage.HeightStore
-	healthStore   *storage.HealthStore   // V2: per-node per-protocol health
-	archivalStore *storage.ArchivalStore // V2: archival node tracking
-	oracleStore   *storage.OracleStore   // V2: oracle reference heights
+	healthStore   *storage.HealthStore   // per-node per-protocol health
+	archivalStore *storage.ArchivalStore // archival node tracking
+	oracleStore   *storage.OracleStore   // oracle reference heights
 	cache         *storage.Cache
 	endpointStore *storage.ExternalEndpointStore
 	selector      *selector.Selector
-	registry      *adapter.Registry // V2: adapter registry
-	engine        *adapter.Engine   // V2: check engine
+	registry      *adapter.Registry // adapter registry
+	engine        *adapter.Engine   // check engine
 	statusServer  *http.Server
 	statusHandler *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
 	httpServers   []*http.Server     // All HTTP proxy servers (API + RPC)
@@ -93,25 +93,25 @@ func New(configPath string) (*Server, error) {
 	// Initialize scheduler
 	sched := checker.NewScheduler(store, cache, endpointStore, configLoader, pool, logger)
 
-	// V2: Initialize adapter registry with cosmos factory.
+	// Initialize adapter registry with cosmos factory.
 	registry := adapter.NewRegistry()
 	if err := registry.Register(cosmos.New()); err != nil {
 		return nil, fmt.Errorf("failed to register cosmos adapter: %w", err)
 	}
 
-	// V2: Initialize stores and check engine.
+	// Initialize stores and check engine.
 	healthStore := storage.NewHealthStore()
 	archivalStore := storage.NewArchivalStore()
 	oracleStore := storage.NewOracleStore()
-	engine := adapter.NewEngine(checker.NewV2HTTPClient())
+	engine := adapter.NewEngine(checker.NewMultiChainHTTPClient())
 
-	// V2: Initialize selector filters (dormant until configured per-network).
+	// Initialize selector filters (dormant until configured per-network).
 	archivalFilter := selector.NewArchivalFilter(archivalStore, logger)
 	syncFilter := selector.NewSyncFilter(oracleStore, logger)
 	sel.SetArchivalFilter(archivalFilter)
 	sel.SetSyncFilter(syncFilter)
 
-	logger.Info("V2 adapter engine initialized",
+	logger.Info("Adapter engine initialized",
 		zap.Strings("adapters", registry.Types()),
 	)
 

@@ -17,10 +17,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// V2Scheduler coordinates periodic health and height checks using the adapter engine.
+// MultiChainScheduler coordinates periodic health and height checks using the adapter engine.
 // It replaces the hardcoded API/RPC/gRPC checkers with a single engine that
 // executes CheckConfig produced by adapter factories.
-type V2Scheduler struct {
+type MultiChainScheduler struct {
 	cron          *cron.Cron
 	pool          pond.Pool
 	engine        *adapter.Engine
@@ -35,8 +35,8 @@ type V2Scheduler struct {
 	timeout       time.Duration
 }
 
-// NewV2Scheduler creates a V2 scheduler with adapter-driven checks.
-func NewV2Scheduler(
+// NewMultiChainScheduler creates a scheduler with adapter-driven checks.
+func NewMultiChainScheduler(
 	engine *adapter.Engine,
 	registry *adapter.Registry,
 	heightStore *storage.HeightStore,
@@ -46,11 +46,11 @@ func NewV2Scheduler(
 	configLoader *config.Loader,
 	pool pond.Pool,
 	logger *zap.Logger,
-) *V2Scheduler {
+) *MultiChainScheduler {
 	// External checker still uses v1 code — external ring protocol is unchanged.
 	extChecker := NewExternalChecker(heightStore, endpointStore, configLoader, logger)
 
-	return &V2Scheduler{
+	return &MultiChainScheduler{
 		cron: cron.New(
 			cron.WithSeconds(),
 			cron.WithChain(cron.Recover(cron.DefaultLogger)),
@@ -71,7 +71,7 @@ func NewV2Scheduler(
 
 // Start begins scheduled checks. Each network gets its own height check
 // interval based on config; health checks and externals use fixed intervals.
-func (s *V2Scheduler) Start() error {
+func (s *MultiChainScheduler) Start() error {
 	cfg := s.configLoader.Get()
 	s.timeout = cfg.Timeouts.HealthCheck
 
@@ -80,7 +80,7 @@ func (s *V2Scheduler) Start() error {
 		s.checkInternalNodes()
 	})
 	if err != nil {
-		return fmt.Errorf("v2 scheduler: failed to add internal check cron: %w", err)
+		return fmt.Errorf("multi-chain scheduler: failed to add internal check cron: %w", err)
 	}
 
 	// Schedule external ring checks every 10 seconds.
@@ -88,7 +88,7 @@ func (s *V2Scheduler) Start() error {
 		s.checkExternalRings()
 	})
 	if err != nil {
-		return fmt.Errorf("v2 scheduler: failed to add external check cron: %w", err)
+		return fmt.Errorf("multi-chain scheduler: failed to add external check cron: %w", err)
 	}
 
 	// Schedule recovery every 10 seconds.
@@ -96,11 +96,11 @@ func (s *V2Scheduler) Start() error {
 		s.recoverFailedEndpoints()
 	})
 	if err != nil {
-		return fmt.Errorf("v2 scheduler: failed to add recovery cron: %w", err)
+		return fmt.Errorf("multi-chain scheduler: failed to add recovery cron: %w", err)
 	}
 
 	s.cron.Start()
-	s.logger.Info("V2 Scheduler started",
+	s.logger.Info("Multi-chain scheduler started",
 		zap.Duration("health_check_timeout", s.timeout),
 	)
 
@@ -108,16 +108,16 @@ func (s *V2Scheduler) Start() error {
 }
 
 // Stop halts the scheduler and closes resources.
-func (s *V2Scheduler) Stop() {
-	s.logger.Info("Stopping V2 scheduler...")
+func (s *MultiChainScheduler) Stop() {
+	s.logger.Info("Stopping multi-chain scheduler...")
 	ctx := s.cron.Stop()
 	<-ctx.Done()
 	s.extChecker.Close()
-	s.logger.Info("V2 scheduler stopped")
+	s.logger.Info("Multi-chain scheduler stopped")
 }
 
 // checkInternalNodes runs height checks for all internal nodes using the adapter engine.
-func (s *V2Scheduler) checkInternalNodes() {
+func (s *MultiChainScheduler) checkInternalNodes() {
 	cfg := s.configLoader.Get()
 	s.timeout = cfg.Timeouts.HealthCheck
 
@@ -238,7 +238,7 @@ func (s *V2Scheduler) checkInternalNodes() {
 }
 
 // checkExternalRings delegates to the existing ExternalChecker.
-func (s *V2Scheduler) checkExternalRings() {
+func (s *MultiChainScheduler) checkExternalRings() {
 	cfg := s.configLoader.Get()
 	s.timeout = cfg.Timeouts.HealthCheck
 
@@ -266,7 +266,7 @@ func (s *V2Scheduler) checkExternalRings() {
 	}
 }
 
-func (s *V2Scheduler) getAllNetworks(cfg *config.Config) []string {
+func (s *MultiChainScheduler) getAllNetworks(cfg *config.Config) []string {
 	networksMap := make(map[string]bool)
 	for _, node := range cfg.Internals {
 		networksMap[node.Network] = true
@@ -282,7 +282,7 @@ func (s *V2Scheduler) getAllNetworks(cfg *config.Config) []string {
 	return networks
 }
 
-func (s *V2Scheduler) recoverFailedEndpoints() {
+func (s *MultiChainScheduler) recoverFailedEndpoints() {
 	cfg := s.configLoader.Get()
 	s.timeout = cfg.Timeouts.HealthCheck
 
@@ -334,8 +334,8 @@ func v1NodeURL(node config.Node, protocol string) string {
 	}
 }
 
-// NewV2HTTPClient creates the shared HTTP client for the V2 engine.
-// Used by server/ when wiring the V2 scheduler.
-func NewV2HTTPClient() *http.Client {
+// NewMultiChainHTTPClient creates the shared HTTP client for the multi-chain engine.
+// Used by server/ when wiring the multi-chain scheduler.
+func NewMultiChainHTTPClient() *http.Client {
 	return newCheckerHTTPClient()
 }

@@ -4,7 +4,7 @@ import "net/http"
 
 // CheckConfig describes how to perform a height check against a node.
 // The engine executes this config — adapters produce it. This is the
-// single representation that all chain types share (V2 rule: one path).
+// single representation that all chain types share .
 type CheckConfig struct {
 	// Method is the HTTP method: GET or POST.
 	Method string

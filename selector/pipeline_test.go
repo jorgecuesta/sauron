@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// setupFullPipeline creates a Selector with all V2 filters wired,
+// setupFullPipeline creates a Selector with all filters wired,
 // matching the server.New() wiring. This is the closest we can get
 // to testing the real production configuration without starting HTTP servers.
 func setupFullPipeline(t *testing.T) (
