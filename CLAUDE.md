@@ -91,6 +91,8 @@ Unit tests prove each function works. Integration tests prove they work **togeth
 
 7. **Test round-robin survives filtering**: After filters reduce the candidate set, verify round-robin distributes correctly among survivors (not among the original full set).
 
+8. **Full combination matrix for optional features**: If a pipeline has N optional components (filters, middleware, stores), test ALL 2^N combinations of enabled/disabled. For 3 optional filters = 8 tests minimum. Don't just test "all on" and "all off" — a filter that works alone can break when another filter is nil. Also test "wired but unconfigured" as a separate state from "not wired at all".
+
 #### Level 3: E2E / Docker Tests
 
 For system-level validation with real network calls, real configs, real containers:
