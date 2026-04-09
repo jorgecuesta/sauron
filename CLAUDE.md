@@ -43,6 +43,10 @@ go test -count=3 ./...  # Flaky test check
 
 ### Test Quality Requirements (NON-NEGOTIABLE)
 
+Tests exist at THREE levels. All three are required for any feature that spans multiple components:
+
+#### Level 1: Unit Tests (per function/method)
+
 Every test file MUST cover all of these categories. If a category is missing, the tests are incomplete:
 
 1. **Happy paths**: Every public function's primary use case, with realistic data matching production inputs (e.g. actual Cosmos RPC responses, real EVM hex heights, real GraphQL payloads).
@@ -69,7 +73,40 @@ Every test file MUST cover all of these categories. If a category is missing, th
 
 7. **No magic strings in test logic**: Do NOT use `if tt.name == "special case"` in the test loop. Use struct fields (`wantAnyErr bool`) to control test behavior.
 
-8. **Integration-like tests**: For HTTP clients/engines, test with `httptest.NewServer` using realistic response bodies. For context-aware code, test with canceled contexts.
+#### Level 2: Pipeline/Integration Tests (per feature flow)
+
+Unit tests prove each function works. Integration tests prove they work **together**. Every feature that involves multiple components wired together MUST have pipeline tests. The pattern:
+
+1. **Setup matches production wiring**: Use a helper (e.g. `setupFullPipeline`) that creates and connects components exactly as `server.New()` does. If the test wiring diverges from production wiring, the test is worthless.
+
+2. **Test the pipeline, not the parts**: "Node passes health but fails archival" is a pipeline test. "ArchivalFilter excludes non-archival nodes" is a unit test. Both are needed.
+
+3. **Test filter/middleware ordering**: If component A runs before B, prove that a request excluded by A never reaches B. Ordering bugs are invisible to unit tests.
+
+4. **Test "wired but unconfigured" state**: Features that are opt-in per network (archival, sync) must be tested in the state where the infrastructure is wired but no network has enabled the feature. This is V1 compatibility and the most common production state during rollout.
+
+5. **Test multi-network independence**: If network A has archival enabled and network B does not, prove that B is unaffected by A's config.
+
+6. **Test state transitions end-to-end**: Node goes unhealthy → excluded → recovers → re-included. Test the full lifecycle through the pipeline, not just individual store operations.
+
+7. **Test round-robin survives filtering**: After filters reduce the candidate set, verify round-robin distributes correctly among survivors (not among the original full set).
+
+#### Level 3: E2E / Docker Tests
+
+For system-level validation with real network calls, real configs, real containers:
+- `make docker-test` — external validation (23 tests)
+- `make docker-test-advanced` — advanced features (27 tests)
+- Run after any change that touches server wiring, config parsing, or proxy routing.
+
+#### Cross-Cutting Rules (All Levels)
+
+8. **Concurrency tests**: Any store or shared state must have a concurrent access test with `sync.WaitGroup` + race detector. The test must do reads and writes simultaneously.
+
+9. **Nil/disabled safety**: Every optional component (HealthStore, ArchivalFilter, SyncFilter) must be tested as nil. The system must not panic when optional features are absent.
+
+10. **Copy semantics**: Any method that returns a struct pointer from a store (`GetHealth`, `GetFull`, `GetStatus`) must verify that mutating the returned copy does not affect the store's internal state.
+
+11. **Self-review after writing tests**: Re-read every assertion. Ask: "does this assertion actually prove what I think it proves?" A test that checks `len(result) != 0` when it should check `result[0].name == "node-1"` is a test that passes for the wrong reasons.
 
 ## Config Format
 
@@ -253,6 +290,12 @@ Every code change must pass ALL of these before it is considered done:
    - DRY violations (duplicated logic)
    - Log levels (no Info on hot paths)
    - Metric cardinality (no unbounded labels)
+8. **Wiring review**: For any new component (store, filter, checker), verify:
+   - It is created in `server.New()` or the relevant orchestrator
+   - It is passed to every consumer that needs it
+   - Consumers handle the nil case if the component is optional
+   - There is a pipeline test that proves the wiring works end-to-end
+   - The component appears in `Shutdown()` cleanup if it holds resources
 
 If any gate fails, fix it before reporting completion. Do NOT report "done" with known failures.
 
