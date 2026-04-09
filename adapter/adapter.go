@@ -27,6 +27,7 @@ type NetworkConfig struct {
 	Name     string
 	Type     string
 	Interval string // e.g. "30s"
+	Mode     string // Chain-specific mode (e.g. EVM: "latest", "safe", "finalized")
 
 	// HeightCheck overrides (used by custom type, ignored by native adapters).
 	HeightCheck *HeightCheckOverride

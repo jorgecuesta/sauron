@@ -12,6 +12,7 @@ import (
 
 	"sauron/adapter"
 	"sauron/adapter/cosmos"
+	"sauron/adapter/evm"
 	"sauron/checker"
 	"sauron/config"
 	"sauron/proxy"
@@ -98,6 +99,9 @@ func New(configPath string) (*Server, error) {
 	registry := adapter.NewRegistry()
 	if err := registry.Register(cosmos.New()); err != nil {
 		return nil, fmt.Errorf("failed to register cosmos adapter: %w", err)
+	}
+	if err := registry.Register(evm.New()); err != nil {
+		return nil, fmt.Errorf("failed to register evm adapter: %w", err)
 	}
 
 	// Initialize stores and check engine.
