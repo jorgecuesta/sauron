@@ -17,12 +17,21 @@ import (
 // Selector chooses the best node for a given network and endpoint type
 // The Dark Lord's judgment - highest height → round-robin distribution
 type Selector struct {
-	store         *storage.HeightStore
-	healthStore   *storage.HealthStore // Optional: if set, filters by protocol health (V2)
-	endpointStore *storage.ExternalEndpointStore
-	configLoader  *config.Loader
-	logger        *zap.Logger
-	rrCounters    sync.Map // map[string]*uint64 — per "network:type" round-robin counter
+	store          *storage.HeightStore
+	healthStore    *storage.HealthStore // Optional: if set, filters by protocol health (V2)
+	endpointStore  *storage.ExternalEndpointStore
+	archivalFilter *ArchivalFilter // Optional: V2 archival node filtering
+	syncFilter     *SyncFilter     // Optional: V2 oracle drift filtering
+	configLoader   *config.Loader
+	logger         *zap.Logger
+	rrCounters     sync.Map // map[string]*uint64 — per "network:type" round-robin counter
+	syncMaxDrifts  sync.Map // network → int64, configured max drift per network
+}
+
+// nodeWithName pairs a node name with its metrics for internal processing.
+type nodeWithName struct {
+	name    string
+	metrics *storage.NodeMetrics
 }
 
 // SelectionDecision tracks why a node was selected
@@ -50,18 +59,23 @@ func (s *Selector) SetHealthStore(hs *storage.HealthStore) {
 	s.healthStore = hs
 }
 
+// SetArchivalFilter enables V2 archival node filtering.
+func (s *Selector) SetArchivalFilter(f *ArchivalFilter) {
+	s.archivalFilter = f
+}
+
+// SetSyncFilter enables V2 oracle drift filtering.
+func (s *Selector) SetSyncFilter(f *SyncFilter) {
+	s.syncFilter = f
+}
+
 // GetBestNode returns the best node for the given network and endpoint type
 // The Eye sees all, the Dark Lord judges
 func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
 	// Get all internal nodes for this network and type
 	nodesMap := s.store.GetByNetwork(network, endpointType)
 
-	// Convert map to slice for easier processing
-	type nodeWithName struct {
-		name    string
-		metrics *storage.NodeMetrics
-	}
-
+	// Convert map to slice for easier processing.
 	nodes := make([]nodeWithName, 0, len(nodesMap))
 	for name, m := range nodesMap {
 		nodes = append(nodes, nodeWithName{name: name, metrics: m})
@@ -88,6 +102,13 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		}
 		nodes = filtered
 	}
+
+	// V2 step 4: filter by archival status if configured.
+	nodes = s.archivalFilter.Filter(network, nodes)
+
+	// V2 step 5: filter by sync/oracle drift if configured.
+	// maxDrift of 0 means no sync filtering (handled inside Filter).
+	nodes = s.syncFilter.Filter(network, s.getSyncMaxDrift(network), nodes)
 
 	// Find max internal height
 	var maxInternalHeight int64
@@ -329,4 +350,20 @@ func (s *Selector) GetHighestHeights(network string, enabledTypes []string) map[
 	}
 
 	return result
+}
+
+// SetSyncMaxDrift configures the max drift for a specific network.
+// Called during config loading or network setup.
+func (s *Selector) SetSyncMaxDrift(network string, maxDrift int64) {
+	s.syncMaxDrifts.Store(network, maxDrift)
+}
+
+// getSyncMaxDrift returns the configured max drift for a network.
+// Returns 0 if not configured (no filtering).
+func (s *Selector) getSyncMaxDrift(network string) int64 {
+	v, ok := s.syncMaxDrifts.Load(network)
+	if !ok {
+		return 0
+	}
+	return v.(int64)
 }
