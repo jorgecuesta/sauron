@@ -19,6 +19,7 @@ func TestArchivalFilter_ExcludesNonArchival(t *testing.T) {
 	archStore.SetNotArchival("pocket", "seed-two")
 
 	f := NewArchivalFilter(archStore, zap.NewNop())
+	f.RequireArchival("pocket")
 	nodes := []nodeWithName{
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 		{name: "seed-two", metrics: &storage.NodeMetrics{Height: 100}},
@@ -41,6 +42,7 @@ func TestArchivalFilter_AllArchival(t *testing.T) {
 	archStore.SetArchival("pocket", "seed-two")
 
 	f := NewArchivalFilter(archStore, zap.NewNop())
+	f.RequireArchival("pocket")
 	nodes := []nodeWithName{
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 		{name: "seed-two", metrics: &storage.NodeMetrics{Height: 100}},
@@ -60,6 +62,7 @@ func TestArchivalFilter_NoneArchival(t *testing.T) {
 	archStore.SetNotArchival("pocket", "seed-two")
 
 	f := NewArchivalFilter(archStore, zap.NewNop())
+	f.RequireArchival("pocket")
 	nodes := []nodeWithName{
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 		{name: "seed-two", metrics: &storage.NodeMetrics{Height: 100}},
@@ -78,6 +81,7 @@ func TestArchivalFilter_NeverCheckedExcluded(t *testing.T) {
 	// seed-one never checked — should be excluded (conservative).
 
 	f := NewArchivalFilter(archStore, zap.NewNop())
+	f.RequireArchival("pocket")
 	nodes := []nodeWithName{
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 	}
@@ -102,6 +106,24 @@ func TestArchivalFilter_NilFilter(t *testing.T) {
 	}
 }
 
+func TestArchivalFilter_NetworkNotRequired(t *testing.T) {
+	t.Parallel()
+
+	archStore := storage.NewArchivalStore()
+	archStore.SetNotArchival("pocket", "seed-one") // Marked not archival.
+
+	f := NewArchivalFilter(archStore, zap.NewNop())
+	// NOT calling RequireArchival — network should pass through unfiltered.
+	nodes := []nodeWithName{
+		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
+	}
+
+	result := f.Filter("pocket", nodes)
+	if len(result) != 1 {
+		t.Fatalf("non-required network should pass through, got %d nodes", len(result))
+	}
+}
+
 func TestArchivalFilter_NilStore(t *testing.T) {
 	t.Parallel()
 
@@ -121,6 +143,7 @@ func TestArchivalFilter_EmptyNodes(t *testing.T) {
 
 	archStore := storage.NewArchivalStore()
 	f := NewArchivalFilter(archStore, zap.NewNop())
+	f.RequireArchival("pocket")
 
 	result := f.Filter("pocket", nil)
 	if len(result) != 0 {
@@ -136,6 +159,8 @@ func TestArchivalFilter_IndependentNetworks(t *testing.T) {
 	archStore.SetNotArchival("ethereum", "node-1")
 
 	f := NewArchivalFilter(archStore, zap.NewNop())
+	f.RequireArchival("pocket")
+	f.RequireArchival("ethereum")
 
 	pocketNodes := []nodeWithName{
 		{name: "node-1", metrics: &storage.NodeMetrics{Height: 100}},
@@ -170,7 +195,8 @@ func TestSyncFilter_ExcludesDriftedNodes(t *testing.T) {
 		{name: "seed-three", metrics: &storage.NodeMetrics{Height: 96}}, // drift=4 <= 5
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 nodes, got %d", len(result))
 	}
@@ -202,7 +228,8 @@ func TestSyncFilter_ExcludesAheadNodes(t *testing.T) {
 		{name: "seed-two", metrics: &storage.NodeMetrics{Height: 110}}, // drift=10 > 5, ahead
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 node, got %d", len(result))
 	}
@@ -222,7 +249,8 @@ func TestSyncFilter_ExactlyAtDrift(t *testing.T) {
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 95}}, // drift=5, exactly at limit
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 node (drift exactly at max), got %d", len(result))
 	}
@@ -240,7 +268,8 @@ func TestSyncFilter_AllDrifted(t *testing.T) {
 		{name: "seed-two", metrics: &storage.NodeMetrics{Height: 200}}, // drift=100
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 0 {
 		t.Fatalf("expected 0 nodes, got %d", len(result))
 	}
@@ -257,43 +286,28 @@ func TestSyncFilter_NoOracleData(t *testing.T) {
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 1 {
 		t.Fatalf("no oracle data should pass through, got %d nodes", len(result))
 	}
 }
 
-func TestSyncFilter_ZeroMaxDrift(t *testing.T) {
+func TestSyncFilter_NoMaxDriftConfigured(t *testing.T) {
 	t.Parallel()
 
 	oracleStore := storage.NewOracleStore()
 	oracleStore.Update("pocket", 100, "oracle")
 
 	f := NewSyncFilter(oracleStore, zap.NewNop())
+	// No SetMaxDrift called — filter disabled for this network.
 	nodes := []nodeWithName{
-		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 99}},
+		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 50}}, // Would be drifted if active.
 	}
 
-	result := f.Filter("pocket", 0, nodes)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 1 {
-		t.Fatalf("zero maxDrift should disable filter, got %d nodes", len(result))
-	}
-}
-
-func TestSyncFilter_NegativeMaxDrift(t *testing.T) {
-	t.Parallel()
-
-	oracleStore := storage.NewOracleStore()
-	oracleStore.Update("pocket", 100, "oracle")
-
-	f := NewSyncFilter(oracleStore, zap.NewNop())
-	nodes := []nodeWithName{
-		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 99}},
-	}
-
-	result := f.Filter("pocket", -1, nodes)
-	if len(result) != 1 {
-		t.Fatalf("negative maxDrift should disable filter, got %d nodes", len(result))
+		t.Fatalf("no maxDrift configured should disable filter, got %d nodes", len(result))
 	}
 }
 
@@ -305,7 +319,8 @@ func TestSyncFilter_NilFilter(t *testing.T) {
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 1 {
 		t.Fatalf("nil filter should pass through, got %d nodes", len(result))
 	}
@@ -319,7 +334,8 @@ func TestSyncFilter_NilStore(t *testing.T) {
 		{name: "seed-one", metrics: &storage.NodeMetrics{Height: 100}},
 	}
 
-	result := f.Filter("pocket", 5, nodes)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nodes)
 	if len(result) != 1 {
 		t.Fatalf("nil store should pass through, got %d nodes", len(result))
 	}
@@ -332,7 +348,8 @@ func TestSyncFilter_EmptyNodes(t *testing.T) {
 	oracleStore.Update("pocket", 100, "oracle")
 
 	f := NewSyncFilter(oracleStore, zap.NewNop())
-	result := f.Filter("pocket", 5, nil)
+	f.SetMaxDrift("pocket", 5)
+	result := f.Filter("pocket", nil)
 	if len(result) != 0 {
 		t.Fatalf("expected 0 nodes, got %d", len(result))
 	}
@@ -346,6 +363,8 @@ func TestSyncFilter_IndependentNetworks(t *testing.T) {
 	oracleStore.Update("ethereum", 20000000, "oracle-eth")
 
 	f := NewSyncFilter(oracleStore, zap.NewNop())
+	f.SetMaxDrift("pocket", 5)
+	f.SetMaxDrift("ethereum", 5)
 
 	pocketNodes := []nodeWithName{
 		{name: "node-1", metrics: &storage.NodeMetrics{Height: 90}}, // drift=10 > 5
@@ -354,8 +373,8 @@ func TestSyncFilter_IndependentNetworks(t *testing.T) {
 		{name: "node-1", metrics: &storage.NodeMetrics{Height: 19999998}}, // drift=2 <= 5
 	}
 
-	pResult := f.Filter("pocket", 5, pocketNodes)
-	eResult := f.Filter("ethereum", 5, ethNodes)
+	pResult := f.Filter("pocket", pocketNodes)
+	eResult := f.Filter("ethereum", ethNodes)
 
 	if len(pResult) != 0 {
 		t.Fatalf("pocket: expected 0 (drifted), got %d", len(pResult))
@@ -387,10 +406,15 @@ func TestSelector_WithArchivalAndSyncFilters(t *testing.T) {
 	// Oracle at 100, max drift 5. node-3 (height 90) drift=10 > 5.
 	oracleStore.Update("pocket", 100, "oracle")
 
+	archFilter := NewArchivalFilter(archivalStore, logger)
+	archFilter.RequireArchival("pocket")
+
+	syncFilter := NewSyncFilter(oracleStore, logger)
+	syncFilter.SetMaxDrift("pocket", 5)
+
 	sel := NewSelector(heightStore, nil, configLoader, logger)
-	sel.SetArchivalFilter(NewArchivalFilter(archivalStore, logger))
-	sel.SetSyncFilter(NewSyncFilter(oracleStore, logger))
-	sel.SetSyncMaxDrift("pocket", 5)
+	sel.SetArchivalFilter(archFilter)
+	sel.SetSyncFilter(syncFilter)
 
 	m, nodeName, decision := sel.GetBestNode("pocket", "api")
 

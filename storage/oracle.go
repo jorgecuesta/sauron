@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"sync"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -17,9 +18,11 @@ type OracleHeight struct {
 // one per network. Used by the sync filter to detect nodes that have
 // drifted too far from the canonical chain height.
 //
-// Thread-safe via xsync.Map (lock-free reads).
+// Thread-safe: xsync.Map for lock-free reads, per-network mutex for
+// compare-and-swap updates.
 type OracleStore struct {
 	data *xsync.Map[string, *OracleHeight]
+	mu   sync.Mutex // Protects Load+Store atomicity in Update.
 }
 
 // NewOracleStore creates a new oracle height store.
@@ -34,6 +37,9 @@ func NewOracleStore() *OracleStore {
 // If the new height is lower or equal, it is ignored (oracles should
 // only move forward).
 func (s *OracleStore) Update(network string, height int64, source string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	existing, loaded := s.data.Load(network)
 	if loaded && existing.Height >= height {
 		return

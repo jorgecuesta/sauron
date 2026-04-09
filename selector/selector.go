@@ -25,7 +25,6 @@ type Selector struct {
 	configLoader   *config.Loader
 	logger         *zap.Logger
 	rrCounters     sync.Map // map[string]*uint64 — per "network:type" round-robin counter
-	syncMaxDrifts  sync.Map // network → int64, configured max drift per network
 }
 
 // nodeWithName pairs a node name with its metrics for internal processing.
@@ -89,7 +88,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 
 	// V2: filter by protocol health if HealthStore is available.
 	if s.healthStore != nil {
-		filtered := nodes[:0]
+		filtered := make([]nodeWithName, 0, len(nodes))
 		for _, n := range nodes {
 			if s.healthStore.IsHealthy(network, n.name, endpointType) {
 				filtered = append(filtered, n)
@@ -107,8 +106,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	nodes = s.archivalFilter.Filter(network, nodes)
 
 	// V2 step 5: filter by sync/oracle drift if configured.
-	// maxDrift of 0 means no sync filtering (handled inside Filter).
-	nodes = s.syncFilter.Filter(network, s.getSyncMaxDrift(network), nodes)
+	nodes = s.syncFilter.Filter(network, nodes)
 
 	// Find max internal height
 	var maxInternalHeight int64
@@ -350,20 +348,4 @@ func (s *Selector) GetHighestHeights(network string, enabledTypes []string) map[
 	}
 
 	return result
-}
-
-// SetSyncMaxDrift configures the max drift for a specific network.
-// Called during config loading or network setup.
-func (s *Selector) SetSyncMaxDrift(network string, maxDrift int64) {
-	s.syncMaxDrifts.Store(network, maxDrift)
-}
-
-// getSyncMaxDrift returns the configured max drift for a network.
-// Returns 0 if not configured (no filtering).
-func (s *Selector) getSyncMaxDrift(network string) int64 {
-	v, ok := s.syncMaxDrifts.Load(network)
-	if !ok {
-		return 0
-	}
-	return v.(int64)
 }

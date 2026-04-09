@@ -32,7 +32,9 @@ type Server struct {
 	pool          pond.Pool
 	scheduler     *checker.Scheduler
 	store         *storage.HeightStore
-	healthStore   *storage.HealthStore // V2: per-node per-protocol health
+	healthStore   *storage.HealthStore   // V2: per-node per-protocol health
+	archivalStore *storage.ArchivalStore // V2: archival node tracking
+	oracleStore   *storage.OracleStore   // V2: oracle reference heights
 	cache         *storage.Cache
 	endpointStore *storage.ExternalEndpointStore
 	selector      *selector.Selector
@@ -97,9 +99,17 @@ func New(configPath string) (*Server, error) {
 		return nil, fmt.Errorf("failed to register cosmos adapter: %w", err)
 	}
 
-	// V2: Initialize health store and check engine (dormant in Phase 1).
+	// V2: Initialize stores and check engine.
 	healthStore := storage.NewHealthStore()
+	archivalStore := storage.NewArchivalStore()
+	oracleStore := storage.NewOracleStore()
 	engine := adapter.NewEngine(checker.NewV2HTTPClient())
+
+	// V2: Initialize selector filters (dormant until configured per-network).
+	archivalFilter := selector.NewArchivalFilter(archivalStore, logger)
+	syncFilter := selector.NewSyncFilter(oracleStore, logger)
+	sel.SetArchivalFilter(archivalFilter)
+	sel.SetSyncFilter(syncFilter)
 
 	logger.Info("V2 adapter engine initialized",
 		zap.Strings("adapters", registry.Types()),
@@ -112,6 +122,8 @@ func New(configPath string) (*Server, error) {
 		scheduler:     sched,
 		store:         store,
 		healthStore:   healthStore,
+		archivalStore: archivalStore,
+		oracleStore:   oracleStore,
 		cache:         cache,
 		endpointStore: endpointStore,
 		selector:      sel,
