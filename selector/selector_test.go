@@ -719,3 +719,184 @@ func TestSelectorNoInternalsOnlyExternals(t *testing.T) {
 		t.Errorf("Expected 1 candidate, got %d", decision.Candidates)
 	}
 }
+
+// --- V2 HealthStore filtering tests ---
+
+func TestSelector_HealthFilter_ExcludesUnhealthy(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	configLoader := createTestConfig(t, 2)
+
+	// Both nodes at height 100.
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 100, 30*time.Millisecond, "internal")
+
+	// node-1 healthy, node-2 unhealthy for api protocol.
+	healthStore.SetHealthy("pocket", "node-1", "api")
+	healthStore.SetUnhealthy("pocket", "node-2", "api", "connection refused")
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	m, nodeName, decision := sel.GetBestNode("pocket", "api")
+
+	if m == nil {
+		t.Fatal("expected node to be selected")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1, got %s", nodeName)
+	}
+	if decision.Candidates != 1 {
+		t.Fatalf("expected 1 candidate after health filter, got %d", decision.Candidates)
+	}
+}
+
+func TestSelector_HealthFilter_AllUnhealthy(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	configLoader := createTestConfig(t, 2)
+
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 100, 30*time.Millisecond, "internal")
+
+	healthStore.SetUnhealthy("pocket", "node-1", "api", "down")
+	healthStore.SetUnhealthy("pocket", "node-2", "api", "down")
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	m, _, _ := sel.GetBestNode("pocket", "api")
+	if m != nil {
+		t.Fatal("expected nil when all nodes are unhealthy")
+	}
+}
+
+func TestSelector_HealthFilter_NeverChecked(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	configLoader := createTestConfig(t, 2)
+
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+
+	// No health check recorded — conservative: excluded.
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	m, _, _ := sel.GetBestNode("pocket", "api")
+	if m != nil {
+		t.Fatal("expected nil when node has never been health-checked")
+	}
+}
+
+func TestSelector_HealthFilter_IndependentProtocols(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	configLoader := createTestConfig(t, 2)
+
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+
+	// Healthy for rpc, unhealthy for api.
+	healthStore.SetHealthy("pocket", "node-1", "rpc")
+	healthStore.SetUnhealthy("pocket", "node-1", "api", "broken")
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	// API should fail.
+	m, _, _ := sel.GetBestNode("pocket", "api")
+	if m != nil {
+		t.Fatal("expected nil for unhealthy api")
+	}
+
+	// RPC should work.
+	m, nodeName, _ := sel.GetBestNode("pocket", "rpc")
+	if m == nil {
+		t.Fatal("expected node for healthy rpc")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1, got %s", nodeName)
+	}
+}
+
+func TestSelector_HealthFilter_NotSet_NoFiltering(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	configLoader := createTestConfig(t, 2)
+
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+
+	// No HealthStore — V1 mode.
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node without health filtering")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1, got %s", nodeName)
+	}
+}
+
+func TestSelector_HealthFilter_RecoveredNode(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	configLoader := createTestConfig(t, 2)
+
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+
+	// Unhealthy.
+	healthStore.SetUnhealthy("pocket", "node-1", "api", "down")
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	m, _, _ := sel.GetBestNode("pocket", "api")
+	if m != nil {
+		t.Fatal("expected nil while unhealthy")
+	}
+
+	// Recover.
+	healthStore.SetHealthy("pocket", "node-1", "api")
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node after recovery")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1, got %s", nodeName)
+	}
+}
+
+func TestSelector_HealthFilter_PrefersHealthyOverHigher(t *testing.T) {
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	configLoader := createTestConfig(t, 2)
+
+	// node-1 higher, node-2 lower.
+	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 99, 30*time.Millisecond, "internal")
+
+	// node-1 unhealthy, node-2 healthy.
+	healthStore.SetUnhealthy("pocket", "node-1", "api", "timeout")
+	healthStore.SetHealthy("pocket", "node-2", "api")
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node to be selected")
+	}
+	if nodeName != "node-2" {
+		t.Fatalf("expected node-2 (healthy), got %s", nodeName)
+	}
+	if m.Height != 99 {
+		t.Fatalf("expected height 99, got %d", m.Height)
+	}
+}

@@ -18,6 +18,7 @@ import (
 // The Dark Lord's judgment - highest height → round-robin distribution
 type Selector struct {
 	store         *storage.HeightStore
+	healthStore   *storage.HealthStore // Optional: if set, filters by protocol health (V2)
 	endpointStore *storage.ExternalEndpointStore
 	configLoader  *config.Loader
 	logger        *zap.Logger
@@ -43,6 +44,12 @@ func NewSelector(store *storage.HeightStore, endpointStore *storage.ExternalEndp
 	}
 }
 
+// SetHealthStore enables V2 health-based filtering.
+// When set, nodes whose protocol endpoint is unhealthy are excluded from selection.
+func (s *Selector) SetHealthStore(hs *storage.HealthStore) {
+	s.healthStore = hs
+}
+
 // GetBestNode returns the best node for the given network and endpoint type
 // The Eye sees all, the Dark Lord judges
 func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
@@ -65,6 +72,22 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		zap.String("type", endpointType),
 		zap.Int("count", len(nodes)),
 	)
+
+	// V2: filter by protocol health if HealthStore is available.
+	if s.healthStore != nil {
+		filtered := nodes[:0]
+		for _, n := range nodes {
+			if s.healthStore.IsHealthy(network, n.name, endpointType) {
+				filtered = append(filtered, n)
+			} else {
+				s.logger.Debug("Selector: node excluded by health filter",
+					zap.String("node", n.name),
+					zap.String("protocol", endpointType),
+				)
+			}
+		}
+		nodes = filtered
+	}
 
 	// Find max internal height
 	var maxInternalHeight int64
