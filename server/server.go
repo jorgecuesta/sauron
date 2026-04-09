@@ -38,8 +38,9 @@ type Server struct {
 	cache         *storage.Cache
 	endpointStore *storage.ExternalEndpointStore
 	selector      *selector.Selector
-	registry      *adapter.Registry // adapter registry
-	engine        *adapter.Engine   // check engine
+	registry      *adapter.Registry      // adapter registry
+	engine        *adapter.Engine        // check engine
+	oracleChecker *checker.OracleChecker // oracle height checker
 	statusServer  *http.Server
 	statusHandler *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
 	httpServers   []*http.Server     // All HTTP proxy servers (API + RPC)
@@ -111,6 +112,9 @@ func New(configPath string) (*Server, error) {
 	sel.SetArchivalFilter(archivalFilter)
 	sel.SetSyncFilter(syncFilter)
 
+	// Initialize oracle checker (configs added per-network during setup).
+	oracleChecker := checker.NewOracleChecker(engine, oracleStore, logger)
+
 	logger.Info("Adapter engine initialized",
 		zap.Strings("adapters", registry.Types()),
 	)
@@ -129,6 +133,7 @@ func New(configPath string) (*Server, error) {
 		selector:      sel,
 		registry:      registry,
 		engine:        engine,
+		oracleChecker: oracleChecker,
 		errCh:         make(chan error, 10),
 	}, nil
 }
