@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"sauron/adapter"
+	"sauron/adapter/cosmos"
 	"sauron/checker"
 	"sauron/config"
 	"sauron/proxy"
@@ -30,9 +32,12 @@ type Server struct {
 	pool          pond.Pool
 	scheduler     *checker.Scheduler
 	store         *storage.HeightStore
+	healthStore   *storage.HealthStore // V2: per-node per-protocol health
 	cache         *storage.Cache
 	endpointStore *storage.ExternalEndpointStore
 	selector      *selector.Selector
+	registry      *adapter.Registry // V2: adapter registry
+	engine        *adapter.Engine   // V2: check engine
 	statusServer  *http.Server
 	statusHandler *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
 	httpServers   []*http.Server     // All HTTP proxy servers (API + RPC)
@@ -86,15 +91,32 @@ func New(configPath string) (*Server, error) {
 	// Initialize scheduler
 	sched := checker.NewScheduler(store, cache, endpointStore, configLoader, pool, logger)
 
+	// V2: Initialize adapter registry with cosmos factory.
+	registry := adapter.NewRegistry()
+	if err := registry.Register(cosmos.New()); err != nil {
+		return nil, fmt.Errorf("failed to register cosmos adapter: %w", err)
+	}
+
+	// V2: Initialize health store and check engine (dormant in Phase 1).
+	healthStore := storage.NewHealthStore()
+	engine := adapter.NewEngine(checker.NewV2HTTPClient())
+
+	logger.Info("V2 adapter engine initialized",
+		zap.Strings("adapters", registry.Types()),
+	)
+
 	return &Server{
 		configLoader:  configLoader,
 		logger:        logger,
 		pool:          pool,
 		scheduler:     sched,
 		store:         store,
+		healthStore:   healthStore,
 		cache:         cache,
 		endpointStore: endpointStore,
 		selector:      sel,
+		registry:      registry,
+		engine:        engine,
 		errCh:         make(chan error, 10),
 	}, nil
 }
