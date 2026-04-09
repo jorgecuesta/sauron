@@ -13,6 +13,7 @@ import (
 	"sauron/adapter"
 	"sauron/adapter/cosmos"
 	"sauron/adapter/evm"
+	"sauron/adapter/solana"
 	"sauron/checker"
 	"sauron/config"
 	"sauron/proxy"
@@ -102,6 +103,9 @@ func New(configPath string) (*Server, error) {
 	}
 	if err := registry.Register(evm.New()); err != nil {
 		return nil, fmt.Errorf("failed to register evm adapter: %w", err)
+	}
+	if err := registry.Register(solana.New()); err != nil {
+		return nil, fmt.Errorf("failed to register solana adapter: %w", err)
 	}
 
 	// Initialize stores and check engine.
