@@ -39,7 +39,37 @@ go test -count=3 ./...  # Flaky test check
 - stdlib `testing` only — no testify, gomock, or external frameworks
 - Temp YAML files + `zap.NewNop()` + in-memory stores for setup
 - `t.Helper()` for helpers, `t.Parallel()` where safe
-- Tests exist in: `selector/`, `config/`, `storage/`, `status/`, `proxy/`, `checker/`, `internal/urlutil/`
+- Tests exist in: `selector/`, `config/`, `storage/`, `status/`, `proxy/`, `checker/`, `internal/urlutil/`, `adapter/`, `internal/jsonpath/`
+
+### Test Quality Requirements (NON-NEGOTIABLE)
+
+Every test file MUST cover all of these categories. If a category is missing, the tests are incomplete:
+
+1. **Happy paths**: Every public function's primary use case, with realistic data matching production inputs (e.g. actual Cosmos RPC responses, real EVM hex heights, real GraphQL payloads).
+
+2. **Error/wrong paths — equal priority to happy paths**:
+   - Invalid input (malformed JSON, empty input, nil values)
+   - Missing data (key not found, empty responses, null fields)
+   - Wrong types (boolean where int expected, object where string expected)
+   - Network failures (connection refused, context canceled, timeout)
+   - HTTP error codes (500, 503, 404)
+
+3. **Edge cases — as many as reasonable**:
+   - Zero values, negative values, empty strings, empty collections
+   - Boundary values (max int64, overflow, very large inputs)
+   - Unicode, special characters in keys/values
+   - Trailing/leading whitespace
+   - Empty but valid structures (`{}`, `[]`)
+
+4. **Field-level verification**: Do NOT just check that a function returns "something". Verify specific field values. If a factory produces a config with `URLPath`, `Method`, `Headers`, `ResponsePath` — check ALL of them, not just one.
+
+5. **Test helper correctness**: If you write a comparison helper (like `jsonEqual`), it must handle ALL types the function can return — maps, slices, nil, primitives. Panics in test helpers are bugs.
+
+6. **Error type verification**: When functions return sentinel errors (`ErrNotFound`, `ErrType`), use `errors.Is()` to verify the correct error type, not just that an error occurred.
+
+7. **No magic strings in test logic**: Do NOT use `if tt.name == "special case"` in the test loop. Use struct fields (`wantAnyErr bool`) to control test behavior.
+
+8. **Integration-like tests**: For HTTP clients/engines, test with `httptest.NewServer` using realistic response bodies. For context-aware code, test with canceled contexts.
 
 ## Config Format
 
