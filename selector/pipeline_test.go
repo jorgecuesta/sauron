@@ -336,3 +336,207 @@ func TestPipeline_ZeroHeightAfterFiltering(t *testing.T) {
 		t.Fatal("expected nil: node with zero height should not be selected")
 	}
 }
+
+// --- Filter combination matrix tests ---
+// Tests every combination of the 3 optional filters (Health, Archival, Sync).
+// setupFullPipeline always wires all filters, but they are only active
+// when configured (SetHealthStore, RequireArchival, SetMaxDrift).
+
+// TestPipeline_NoFilters_V1Pure tests with NO filters active at all.
+// This is V1 behavior — raw height selection with no health/archival/sync.
+func TestPipeline_NoFilters_V1Pure(t *testing.T) {
+	t.Parallel()
+
+	configLoader := createTestConfig(t, 2)
+	heightStore := storage.NewHeightStore()
+	logger := zap.NewNop()
+
+	// No HealthStore, no ArchivalFilter, no SyncFilter.
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+
+	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 99, 10*time.Millisecond, "internal")
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node selected with no filters")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1 (highest), got %s", nodeName)
+	}
+}
+
+// TestPipeline_OnlyArchival tests with only archival filter active.
+func TestPipeline_OnlyArchival(t *testing.T) {
+	t.Parallel()
+
+	configLoader := createTestConfig(t, 2)
+	heightStore := storage.NewHeightStore()
+	archivalStore := storage.NewArchivalStore()
+	logger := zap.NewNop()
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	archFilter := NewArchivalFilter(archivalStore, logger)
+	archFilter.RequireArchival("pocket")
+	sel.SetArchivalFilter(archFilter)
+	// No HealthStore, no SyncFilter.
+
+	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 100, 10*time.Millisecond, "internal")
+
+	archivalStore.SetArchival("pocket", "node-1")
+	archivalStore.SetNotArchival("pocket", "node-2")
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node selected")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1 (archival), got %s", nodeName)
+	}
+}
+
+// TestPipeline_OnlySync tests with only sync filter active.
+func TestPipeline_OnlySync(t *testing.T) {
+	t.Parallel()
+
+	configLoader := createTestConfig(t, 2)
+	heightStore := storage.NewHeightStore()
+	oracleStore := storage.NewOracleStore()
+	logger := zap.NewNop()
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	syncFilter := NewSyncFilter(oracleStore, logger)
+	syncFilter.SetMaxDrift("pocket", 5)
+	sel.SetSyncFilter(syncFilter)
+	// No HealthStore, no ArchivalFilter.
+
+	oracleStore.Update("pocket", 100, "oracle")
+
+	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal") // drift=0
+	heightStore.Update("pocket", "node-2", "api", 80, 10*time.Millisecond, "internal")  // drift=20
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node selected")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1 (within drift), got %s", nodeName)
+	}
+}
+
+// TestPipeline_HealthAndArchival tests health + archival without sync.
+func TestPipeline_HealthAndArchival(t *testing.T) {
+	t.Parallel()
+
+	configLoader := createTestConfig(t, 2)
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	archivalStore := storage.NewArchivalStore()
+	logger := zap.NewNop()
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+	archFilter := NewArchivalFilter(archivalStore, logger)
+	archFilter.RequireArchival("pocket")
+	sel.SetArchivalFilter(archFilter)
+	// No SyncFilter.
+
+	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-3", "api", 100, 10*time.Millisecond, "internal")
+
+	healthStore.SetHealthy("pocket", "node-1", "api")
+	healthStore.SetHealthy("pocket", "node-2", "api")
+	healthStore.SetUnhealthy("pocket", "node-3", "api", "down") // fails health
+
+	archivalStore.SetArchival("pocket", "node-1")
+	archivalStore.SetNotArchival("pocket", "node-2") // fails archival
+	archivalStore.SetArchival("pocket", "node-3")
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node selected")
+	}
+	// node-1: healthy + archival ✓
+	// node-2: healthy but not archival ✗
+	// node-3: unhealthy ✗
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1, got %s", nodeName)
+	}
+}
+
+// TestPipeline_HealthAndSync tests health + sync without archival.
+func TestPipeline_HealthAndSync(t *testing.T) {
+	t.Parallel()
+
+	configLoader := createTestConfig(t, 2)
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	oracleStore := storage.NewOracleStore()
+	logger := zap.NewNop()
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+	syncFilter := NewSyncFilter(oracleStore, logger)
+	syncFilter.SetMaxDrift("pocket", 5)
+	sel.SetSyncFilter(syncFilter)
+	// No ArchivalFilter.
+
+	oracleStore.Update("pocket", 100, "oracle")
+
+	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 80, 10*time.Millisecond, "internal") // drift=20
+
+	healthStore.SetHealthy("pocket", "node-1", "api")
+	healthStore.SetHealthy("pocket", "node-2", "api")
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node selected")
+	}
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1 (within drift), got %s", nodeName)
+	}
+}
+
+// TestPipeline_ArchivalAndSync tests archival + sync without health.
+func TestPipeline_ArchivalAndSync(t *testing.T) {
+	t.Parallel()
+
+	configLoader := createTestConfig(t, 2)
+	heightStore := storage.NewHeightStore()
+	archivalStore := storage.NewArchivalStore()
+	oracleStore := storage.NewOracleStore()
+	logger := zap.NewNop()
+
+	sel := NewSelector(heightStore, nil, configLoader, logger)
+	archFilter := NewArchivalFilter(archivalStore, logger)
+	archFilter.RequireArchival("pocket")
+	sel.SetArchivalFilter(archFilter)
+	syncFilter := NewSyncFilter(oracleStore, logger)
+	syncFilter.SetMaxDrift("pocket", 5)
+	sel.SetSyncFilter(syncFilter)
+	// No HealthStore.
+
+	oracleStore.Update("pocket", 100, "oracle")
+
+	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "api", 80, 10*time.Millisecond, "internal") // drift=20
+	heightStore.Update("pocket", "node-3", "api", 100, 10*time.Millisecond, "internal")
+
+	archivalStore.SetArchival("pocket", "node-1")
+	archivalStore.SetArchival("pocket", "node-2")
+	archivalStore.SetNotArchival("pocket", "node-3") // fails archival
+
+	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	if m == nil {
+		t.Fatal("expected node selected")
+	}
+	// node-1: archival + drift=0 ✓
+	// node-2: archival but drift=20 ✗
+	// node-3: not archival ✗
+	if nodeName != "node-1" {
+		t.Fatalf("expected node-1, got %s", nodeName)
+	}
+}
