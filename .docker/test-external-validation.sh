@@ -141,47 +141,57 @@ else
     print_fail "Expected at least 2 sauron containers running, found $RUNNING"
 fi
 
-# Test 4: Wait for external endpoint discovery
+# Test 4: Wait for external endpoint discovery (via Prometheus metrics)
 print_header "Test 4: External Endpoint Discovery"
 run_test
-print_test "Waiting for primary to discover secondary's endpoints (max 15s)"
+print_test "Waiting for primary to discover secondary's endpoints (max 60s)"
 
-sleep 15  # Give it time to run the external checker
+TIMEOUT=60
+ELAPSED=0
+TRACKED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    TRACKED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    TRACKED=${TRACKED:-0}
+    if [ "$TRACKED" -ge 3 ]; then
+        break
+    fi
+    sleep 2
+    ((ELAPSED+=2))
+done
 
-print_info "Checking primary logs for endpoint discovery..."
-DISCOVERY_LOGS=$(docker logs sauron-primary 2>&1 | grep "Stored new advertised endpoint" | wc -l)
-
-if [ "$DISCOVERY_LOGS" -ge 3 ]; then
-    print_pass "Primary discovered endpoints from secondary (found $DISCOVERY_LOGS entries)"
-    echo ""
-    docker logs sauron-primary 2>&1 | grep "Stored new advertised endpoint"
-    echo ""
+if [ "$TRACKED" -ge 3 ]; then
+    print_pass "Primary discovered endpoints from secondary (tracked: $TRACKED, after ${ELAPSED}s)"
 else
-    print_fail "Primary did not discover expected endpoints (found $DISCOVERY_LOGS entries, expected >= 3)"
+    print_fail "Primary did not discover expected endpoints (tracked: $TRACKED after ${TIMEOUT}s)"
 fi
 
-# Test 5: Verify endpoint validation
+# Test 5: Verify endpoint validation (via Prometheus metrics)
 print_header "Test 5: Endpoint Validation"
 run_test
-print_test "Checking if endpoints were validated successfully"
+print_test "Waiting for endpoints to be validated (max 60s)"
 
-print_info "Checking primary logs for successful validation..."
-VALIDATION_LOGS=$(docker logs sauron-primary 2>&1 | grep "Endpoint validated successfully" | wc -l)
+ELAPSED=0
+VALIDATED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    VALIDATED=${VALIDATED:-0}
+    if [ "$VALIDATED" -ge 3 ]; then
+        break
+    fi
+    sleep 2
+    ((ELAPSED+=2))
+done
 
-if [ "$VALIDATION_LOGS" -ge 3 ]; then
-    print_pass "Endpoints validated successfully (found $VALIDATION_LOGS validations)"
-    echo ""
-    docker logs sauron-primary 2>&1 | grep "Endpoint validated successfully"
-    echo ""
+if [ "$VALIDATED" -ge 3 ]; then
+    print_pass "Endpoints validated successfully (validated: $VALIDATED, after ${ELAPSED}s)"
 else
-    print_fail "Endpoints not validated (found $VALIDATION_LOGS validations, expected >= 3)"
+    print_fail "Endpoints not validated (validated: $VALIDATED after ${TIMEOUT}s)"
 fi
 
 # Test 6: Check Prometheus metrics
 print_header "Test 6: Prometheus Metrics Verification"
 
-# Wait for aggregate metrics to populate after validation cycle
-sleep 15
+# No sleep needed — Tests 4/5 already polled until metrics are populated.
 
 run_test
 print_test "Checking external endpoint tracking metrics"
