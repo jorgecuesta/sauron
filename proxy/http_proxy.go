@@ -264,7 +264,7 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Track 5xx errors for external endpoints
 	if tracker.statusCode >= 500 && p.endpointStore != nil {
 		if p.endpointStore.TrackProxyError(network, p.endpointType, targetURL) {
-			p.logger.Info("Tracked 5xx error for external endpoint",
+			p.logger.Debug("Tracked 5xx error for external endpoint",
 				zap.String("url", targetURL),
 				zap.String("network", network),
 				zap.String("type", p.endpointType),
@@ -308,7 +308,7 @@ func (rt *responseTracker) Write(b []byte) (int, error) {
 // Delegates the actual proxying to the shared ProxyWebSocket function,
 // then records metrics based on the outcome.
 func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision, nodeMetrics *storage.NodeMetrics) {
-	p.logger.Info("Handling WebSocket upgrade",
+	p.logger.Debug("Handling WebSocket upgrade",
 		zap.String("node", nodeName),
 		zap.String("network", network),
 	)

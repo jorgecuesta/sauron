@@ -139,11 +139,9 @@ func New(configPath string) (*Server, error) {
 			// Build oracle configs from sync oracles.
 			oracleCfg, err := buildOracleConfig(&network, registry)
 			if err != nil {
-				logger.Warn("Failed to build oracle config",
-					zap.String("network", network.Name),
-					zap.Error(err),
-				)
-			} else {
+				return nil, fmt.Errorf("network %s: failed to build oracle config: %w", network.Name, err)
+			}
+			{
 				oracleChecker.AddConfig(oracleCfg)
 				logger.Info("Oracle checker configured",
 					zap.String("network", network.Name),

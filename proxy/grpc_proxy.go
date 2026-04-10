@@ -381,7 +381,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 			grpcStatus == codes.DataLoss || grpcStatus == codes.Unknown {
 			if p.endpointStore != nil {
 				if p.endpointStore.TrackProxyError(p.network, "grpc", targetAddr) {
-					p.logger.Info("Tracked gRPC 5xx-equivalent error for external endpoint",
+					p.logger.Debug("Tracked gRPC 5xx-equivalent error for external endpoint",
 						zap.String("addr", targetAddr),
 						zap.String("network", p.network),
 						zap.String("code", grpcStatus.String()),

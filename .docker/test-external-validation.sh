@@ -300,13 +300,15 @@ run_test
 print_test "Checking if secondary status API advertises endpoints"
 
 STATUS=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:4000/pocket/status)
-if echo "$STATUS" | grep -q "height"; then
-    print_pass "Secondary status API contains height and endpoint information"
+# V2 response format: {"height":N,"endpoints":{"rest":"...","rpc":"..."}}
+if echo "$STATUS" | grep -q '"height"' && echo "$STATUS" | grep -q '"endpoints"'; then
+    print_pass "Secondary status API contains height and endpoints (V2 format)"
     echo ""
     echo "$STATUS"
     echo ""
 else
-    print_fail "Secondary status API missing endpoint information"
+    print_fail "Secondary status API missing height or endpoints (expected V2 format)"
+    echo "Got: $STATUS"
 fi
 
 # Test 10: Test tools are available in containers
