@@ -74,7 +74,7 @@ func TestPipeline_AllFiltersActive(t *testing.T) {
 	archivalStore.SetNotArchival("pocket", "node-3")
 	archivalStore.SetArchival("pocket", "node-4")
 
-	m, nodeName, decision := sel.GetBestNode("pocket", "api")
+	m, nodeName, decision := sel.GetBestNode("pocket", "rest")
 
 	if m == nil {
 		t.Fatal("expected a node to be selected")
@@ -103,7 +103,7 @@ func TestPipeline_FiltersWiredButUnconfigured(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
 	heightStore.Update("pocket", "node-2", "rpc", 100, 10*time.Millisecond, "internal")
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 
 	// HealthStore wired but no health data → all nodes excluded (conservative).
 	if m != nil {
@@ -125,7 +125,7 @@ func TestPipeline_HealthyButNoArchivalOrSyncConfig(t *testing.T) {
 	healthStore.SetHealthy("pocket", "node-1", "rest")
 	healthStore.SetHealthy("pocket", "node-2", "rest")
 
-	m, nodeName, decision := sel.GetBestNode("pocket", "api")
+	m, nodeName, decision := sel.GetBestNode("pocket", "rest")
 
 	if m == nil {
 		t.Fatal("expected node to be selected")
@@ -158,7 +158,7 @@ func TestPipeline_FilterOrder(t *testing.T) {
 	healthStore.SetUnhealthy("pocket", "node-1", "rest", "down")
 	archivalStore.SetArchival("pocket", "node-1")
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 
 	if m != nil {
 		t.Fatal("unhealthy node should be excluded regardless of archival/sync status")
@@ -178,7 +178,7 @@ func TestPipeline_HealthyNodeFailsArchival(t *testing.T) {
 	healthStore.SetHealthy("pocket", "node-1", "rest")
 	archivalStore.SetNotArchival("pocket", "node-1")
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 
 	if m != nil {
 		t.Fatal("healthy but non-archival node should be excluded when archival is required")
@@ -200,7 +200,7 @@ func TestPipeline_ArchivalPassesSyncFails(t *testing.T) {
 	healthStore.SetHealthy("pocket", "node-1", "rest")
 	archivalStore.SetArchival("pocket", "node-1")
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 
 	if m != nil {
 		t.Fatal("node passing health+archival but failing sync should be excluded")
@@ -231,13 +231,13 @@ func TestPipeline_MultipleNetworksIndependent(t *testing.T) {
 	healthStore.SetHealthy("ethereum", "node-e", "rest")
 
 	// pocket should fail (archival required, node not archival).
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("pocket: expected nil (fails archival)")
 	}
 
 	// ethereum should succeed (no archival/sync config).
-	m, nodeName, _ := sel.GetBestNode("ethereum", "api")
+	m, nodeName, _ := sel.GetBestNode("ethereum", "rest")
 	if m == nil {
 		t.Fatal("ethereum: expected node to be selected (no filters configured)")
 	}
@@ -263,21 +263,21 @@ func TestPipeline_NodeRecoveryThroughAllFilters(t *testing.T) {
 	healthStore.SetUnhealthy("pocket", "node-1", "rest", "down")
 	archivalStore.SetNotArchival("pocket", "node-1")
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("step 1: expected nil (all filters fail)")
 	}
 
 	// Step 2: health recovers, still fails archival.
 	healthStore.SetHealthy("pocket", "node-1", "rest")
-	m, _, _ = sel.GetBestNode("pocket", "api")
+	m, _, _ = sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("step 2: expected nil (still fails archival)")
 	}
 
 	// Step 3: archival confirmed — now passes all filters.
 	archivalStore.SetArchival("pocket", "node-1")
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("step 3: expected node after full recovery")
 	}
@@ -331,7 +331,7 @@ func TestPipeline_ZeroHeightAfterFiltering(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 0, 10*time.Millisecond, "internal")
 	healthStore.SetHealthy("pocket", "node-1", "rest")
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("expected nil: node with zero height should not be selected")
 	}
@@ -357,7 +357,7 @@ func TestPipeline_NoFilters_V1Pure(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
 	heightStore.Update("pocket", "node-2", "rpc", 99, 10*time.Millisecond, "internal")
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node selected with no filters")
 	}
@@ -387,7 +387,7 @@ func TestPipeline_OnlyArchival(t *testing.T) {
 	archivalStore.SetArchival("pocket", "node-1")
 	archivalStore.SetNotArchival("pocket", "node-2")
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node selected")
 	}
@@ -416,7 +416,7 @@ func TestPipeline_OnlySync(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal") // drift=0
 	heightStore.Update("pocket", "node-2", "rpc", 80, 10*time.Millisecond, "internal")  // drift=20
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node selected")
 	}
@@ -454,7 +454,7 @@ func TestPipeline_HealthAndArchival(t *testing.T) {
 	archivalStore.SetNotArchival("pocket", "node-2") // fails archival
 	archivalStore.SetArchival("pocket", "node-3")
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node selected")
 	}
@@ -491,7 +491,7 @@ func TestPipeline_HealthAndSync(t *testing.T) {
 	healthStore.SetHealthy("pocket", "node-1", "rest")
 	healthStore.SetHealthy("pocket", "node-2", "rest")
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node selected")
 	}
@@ -529,7 +529,7 @@ func TestPipeline_ArchivalAndSync(t *testing.T) {
 	archivalStore.SetArchival("pocket", "node-2")
 	archivalStore.SetNotArchival("pocket", "node-3") // fails archival
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node selected")
 	}

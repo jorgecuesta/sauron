@@ -207,9 +207,9 @@ func TestV2Pipeline_MultipleNodes_MixedHealth(t *testing.T) {
 	}
 }
 
-// TestV2Pipeline_GetEndpointURL_Normalization proves that GetEndpointURL
-// normalizes "api" → "rest" and returns the correct URL from config.
-func TestV2Pipeline_GetEndpointURL_Normalization(t *testing.T) {
+// TestV2Pipeline_GetEndpointURL verifies that GetEndpointURL returns
+// the correct URL for each V2 protocol name.
+func TestV2Pipeline_GetEndpointURL(t *testing.T) {
 	t.Parallel()
 
 	sel, _, _ := setupV2Pipeline(t)
@@ -219,15 +219,11 @@ func TestV2Pipeline_GetEndpointURL_Normalization(t *testing.T) {
 		protocol string
 		wantURL  string
 	}{
-		// "api" must be normalized to "rest" internally.
-		{"node-1", "api", "http://node1.example.com:1317"},
-		// "rpc" as-is.
+		{"node-1", "rest", "http://node1.example.com:1317"},
 		{"node-1", "rpc", "http://node1.example.com:26657"},
-		// "grpc" — returned as-is (no trailing slash normalization for gRPC).
+		// gRPC returned as-is (no trailing slash normalization).
 		{"node-1", "grpc", "node1.example.com:9090"},
-		// node-2 rest.
-		{"node-2", "api", "http://node2.example.com:1317"},
-		// node-2 grpc.
+		{"node-2", "rest", "http://node2.example.com:1317"},
 		{"node-2", "grpc", "node2.example.com:9090"},
 	}
 
@@ -292,27 +288,6 @@ func TestV2Pipeline_EVMNetwork_JSONRPCHeightCheck(t *testing.T) {
 	}
 	if decision.MaxHeight != 5000 {
 		t.Fatalf("expected MaxHeight=5000, got %d", decision.MaxHeight)
-	}
-}
-
-// TestV2Pipeline_APIAlias_SameAsRest proves that requesting "api" (V1 name)
-// goes through the same code path as "rest" for both height lookup and health check.
-func TestV2Pipeline_APIAlias_SameAsRest(t *testing.T) {
-	t.Parallel()
-
-	sel, heightStore, healthStore := setupV2Pipeline(t)
-
-	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
-	healthStore.SetHealthy("pocket", "node-1", "rest") // health stored under "rest"
-
-	// Request via "api" (V1 alias) — should normalize to "rest" and succeed.
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
-
-	if m == nil {
-		t.Fatal("expected node-1: 'api' should alias 'rest'")
-	}
-	if nodeName != "node-1" {
-		t.Fatalf("expected node-1, got %q", nodeName)
 	}
 }
 
@@ -519,8 +494,8 @@ func TestV2Pipeline_ConfigLoadsCorrectly(t *testing.T) {
 }
 
 // TestV2Pipeline_ConcurrentGetBestNode verifies that concurrent calls to
-// GetBestNode (which internally calls heightCheckProtocol, normalizeProtocol,
-// and reads from HeightStore + HealthStore) do not race.
+// GetBestNode (which internally calls heightCheckProtocol and reads from
+// HeightStore + HealthStore) do not race.
 // This simulates the production scenario where multiple proxy goroutines
 // call GetBestNode simultaneously.
 func TestV2Pipeline_ConcurrentGetBestNode(t *testing.T) {
@@ -551,7 +526,7 @@ func TestV2Pipeline_ConcurrentGetBestNode(t *testing.T) {
 		{"pocket", "rest"},
 		{"pocket", "rpc"},
 		{"pocket", "grpc"},
-		{"pocket", "api"}, // V1 alias → normalizeProtocol
+
 		{"ethereum", "jsonrpc"},
 	}
 

@@ -416,7 +416,7 @@ func TestSelector_WithArchivalAndSyncFilters(t *testing.T) {
 	sel.SetArchivalFilter(archFilter)
 	sel.SetSyncFilter(syncFilter)
 
-	m, nodeName, decision := sel.GetBestNode("pocket", "api")
+	m, nodeName, decision := sel.GetBestNode("pocket", "rest")
 
 	if m == nil {
 		t.Fatal("expected a node to be selected")
@@ -444,7 +444,7 @@ func TestSelector_FiltersDisabled_NoFiltering(t *testing.T) {
 	// No filters set — V1 behavior.
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 
-	_, _, decision := sel.GetBestNode("pocket", "api")
+	_, _, decision := sel.GetBestNode("pocket", "rest")
 	if decision.Candidates != 2 {
 		t.Fatalf("expected 2 candidates without filters, got %d", decision.Candidates)
 	}

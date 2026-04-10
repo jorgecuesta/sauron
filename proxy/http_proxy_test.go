@@ -51,7 +51,7 @@ internals:
   - name: node-1
     network: "testnet"
     endpoints:
-      api: "http://127.0.0.1:19999"
+      rest: "http://127.0.0.1:19999"
       rpc: "http://127.0.0.1:19998"
       grpc: "127.0.0.1:19997"
 `
@@ -192,18 +192,18 @@ internals:
   - name: node-1
     network: "testnet"
     endpoints:
-      api: "http://` + backendHost + `"
+      rest: "http://` + backendHost + `"
       rpc: "http://` + backendHost + `"
       grpc: "` + backendHost + `"
 `
 	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
 
 	heightStore := storage.NewHeightStore()
-	heightStore.Update("testnet", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("testnet", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
 
 	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
 	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
-	proxy := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "api", "testnet")
+	proxy := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet")
 
 	const goroutines = 50
 	var wg sync.WaitGroup
@@ -243,7 +243,7 @@ func TestHandleWebSocketUsesOriginalNodeMetrics(t *testing.T) {
 
 	p := &HTTPProxy{
 		logger:       zap.NewNop(),
-		endpointType: "api",
+		endpointType: "rest",
 		network:      "testnet",
 	}
 

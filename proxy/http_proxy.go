@@ -49,7 +49,7 @@ type HTTPProxy struct {
 	transport      *http.Transport
 	reverseProxy   *httputil.ReverseProxy
 	logger         *zap.Logger
-	endpointType   string // "api" or "rpc"
+	endpointType   string // V2 protocol name: "rest", "rpc", "jsonrpc", "http", etc.
 	network        string // The network this proxy serves
 	proxyTimeoutNs atomic.Int64
 }

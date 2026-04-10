@@ -68,15 +68,6 @@ func (s *Selector) SetSyncFilter(f *SyncFilter) {
 	s.syncFilter = f
 }
 
-// normalizeProtocol maps V1 endpoint type names to V2 protocol names.
-// Temporary bridge until task #21 refactors proxies to use V2 naming.
-func normalizeProtocol(endpointType string) string {
-	if endpointType == "api" {
-		return "rest"
-	}
-	return endpointType
-}
-
 // heightCheckProtocol returns the protocol used for height checks for a network.
 // Falls back to "rpc" if the network or height check config is not found.
 func (s *Selector) heightCheckProtocol(network string) string {
@@ -118,8 +109,7 @@ func (s *Selector) heightCheckProtocol(network string) string {
 // The selector queries heights by the network's height-check protocol,
 // then filters by health for the requested endpoint type.
 func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
-	// Normalize V1 protocol names to V2.
-	requestedProtocol := normalizeProtocol(endpointType)
+	requestedProtocol := endpointType
 
 	// Get the height-check protocol for this network.
 	heightProtocol := s.heightCheckProtocol(network)
@@ -323,8 +313,7 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 func (s *Selector) GetEndpointURL(nodeName, endpointType string) string {
 	cfg := s.configLoader.Get()
 
-	// Normalize V1 protocol names to V2.
-	protocol := normalizeProtocol(endpointType)
+	protocol := endpointType
 
 	// Search in internal nodes
 	for _, node := range cfg.Internals {

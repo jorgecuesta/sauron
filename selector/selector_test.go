@@ -81,12 +81,12 @@ func TestSelectorInternalsOnlyWhenWithinThreshold(t *testing.T) {
 	heightStore.Update("pocket", "node-2", "rpc", 98, 30*time.Millisecond, "internal")
 
 	// Setup external endpoint at height 102 (within threshold of 2)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 102, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 102, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -121,12 +121,12 @@ func TestSelectorExternalsAddedWhenAheadByThreshold(t *testing.T) {
 	heightStore.Update("pocket", "node-2", "rpc", 98, 30*time.Millisecond, "internal")
 
 	// Setup external endpoint at height 103 (more than threshold of 2 ahead)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 103, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 103, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -161,12 +161,12 @@ func TestSelectorExternalsAddedWhenNoHealthyInternals(t *testing.T) {
 	heightStore.Update("pocket", "node-2", "rpc", 0, 30*time.Millisecond, "internal")
 
 	// Setup external endpoint at height 100
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 100, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 100, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, _ := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, _ := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -197,7 +197,7 @@ func TestSelectorLatencyTiebreakerSameHeight(t *testing.T) {
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -227,7 +227,7 @@ func TestSelectorHeightWinner(t *testing.T) {
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -259,12 +259,12 @@ func TestSelectorDefaultThreshold(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at 102 - should NOT trigger failover (102 > 100 + 2 = false)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 102, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 102, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	_, nodeName, decision := selector.GetBestNode("pocket", "api")
+	_, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	// Should select internal (external within default threshold of 2)
 	if nodeName != "node-1" {
@@ -287,12 +287,12 @@ func TestSelectorCustomThreshold(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at 103 - would trigger with default threshold but NOT with 5
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 103, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 103, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	_, nodeName, decision := selector.GetBestNode("pocket", "api")
+	_, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	// Should select internal (103 > 100 + 5 = false)
 	if nodeName != "node-1" {
@@ -304,9 +304,9 @@ func TestSelectorCustomThreshold(t *testing.T) {
 	}
 
 	// Now test with external at 106 (should trigger: 106 > 100 + 5 = true)
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 106, 20*time.Millisecond)
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 106, 20*time.Millisecond)
 
-	_, nodeName2, decision2 := selector.GetBestNode("pocket", "api")
+	_, nodeName2, decision2 := selector.GetBestNode("pocket", "rest")
 
 	expectedName := "ext:https://ext1.example.com"
 	if nodeName2 != expectedName {
@@ -329,15 +329,15 @@ func TestSelectorMultipleExternals(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// Multiple externals ahead by threshold
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 105, 100*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 105, 100*time.Millisecond)
 
-	endpointStore.StoreAdvertised("external-2", "https://ring2.example.com", "pocket", "api", "https://ext2.example.com")
-	endpointStore.MarkValidated("external-2", "https://ring2.example.com", "pocket", "api", "https://ext2.example.com", 105, 30*time.Millisecond)
+	endpointStore.StoreAdvertised("external-2", "https://ring2.example.com", "pocket", "rest", "https://ext2.example.com")
+	endpointStore.MarkValidated("external-2", "https://ring2.example.com", "pocket", "rest", "https://ext2.example.com", 105, 30*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -367,7 +367,7 @@ func TestSelectorNoNodes(t *testing.T) {
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics != nil {
 		t.Error("Expected nil metrics when no nodes available")
@@ -394,7 +394,7 @@ func TestSelectorOnlyAvailable(t *testing.T) {
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	_, nodeName, decision := selector.GetBestNode("pocket", "api")
+	_, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if nodeName != "node-1" {
 		t.Errorf("Expected node-1, got %s", nodeName)
@@ -417,15 +417,15 @@ func TestGetHighestHeightsIncludesExternals(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at height 150
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 150, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 150, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	heights := selector.GetHighestHeights("pocket", []string{"api"})
+	heights := selector.GetHighestHeights("pocket", []string{"rest"})
 
-	if heights["api"] != 150 {
-		t.Errorf("Expected highest height 150 (from external), got %d", heights["api"])
+	if heights["rest"] != 150 {
+		t.Errorf("Expected highest height 150 (from external), got %d", heights["rest"])
 	}
 }
 
@@ -440,12 +440,12 @@ func TestSelectorExternalNotValidated(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External advertised but NOT validated (at height 200)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
 	// Not calling MarkValidated, so it's not validated
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	_, nodeName, decision := selector.GetBestNode("pocket", "api")
+	_, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	// Should only select internal since external is not validated
 	if nodeName != "node-1" {
@@ -474,12 +474,12 @@ func TestSelectorInternalWinsOverExternalSameHeight(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
 
 	// External at 105 with higher latency (triggers: 105 > 100 + 2)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 105, 50*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 105, 50*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, _ := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, _ := selector.GetBestNode("pocket", "rest")
 
 	// External should win because it has higher height (105 > 100)
 	expectedName := "ext:https://ext1.example.com"
@@ -495,7 +495,7 @@ func TestSelectorInternalWinsOverExternalSameHeight(t *testing.T) {
 	// because 105 > 105 + 2 = false (internal caught up, no need to overload externals)
 	heightStore.Update("pocket", "node-1", "rpc", 105, 10*time.Millisecond, "internal")
 
-	metrics2, nodeName2, decision2 := selector.GetBestNode("pocket", "api")
+	metrics2, nodeName2, decision2 := selector.GetBestNode("pocket", "rest")
 
 	// Internal should win (and be the only candidate since externals not added)
 	if nodeName2 != "node-1" {
@@ -528,7 +528,7 @@ func TestSelectorNilEndpointStore(t *testing.T) {
 	// Create selector with nil endpointStore
 	selector := NewSelector(heightStore, nil, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -554,12 +554,12 @@ func TestSelectorAllNodesZeroHeight(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 0, 50*time.Millisecond, "internal")
 
 	// External also at height 0 (would be added since internal is 0)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 0, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 0, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	// Should return nil when all nodes have zero height
 	if metrics != nil {
@@ -586,17 +586,17 @@ func TestSelectorExternalNotWorking(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at height 200 but will be marked as not working
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 200, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 200, 20*time.Millisecond)
 
 	// Simulate 3 errors to mark as not working
-	endpointStore.TrackProxyError("pocket", "api", "https://ext1.example.com")
-	endpointStore.TrackProxyError("pocket", "api", "https://ext1.example.com")
-	endpointStore.TrackProxyError("pocket", "api", "https://ext1.example.com")
+	endpointStore.TrackProxyError("pocket", "rest", "https://ext1.example.com")
+	endpointStore.TrackProxyError("pocket", "rest", "https://ext1.example.com")
+	endpointStore.TrackProxyError("pocket", "rest", "https://ext1.example.com")
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	_, nodeName, decision := selector.GetBestNode("pocket", "api")
+	_, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	// Should select internal since external is not working
 	if nodeName != "node-1" {
@@ -620,12 +620,12 @@ func TestSelectorExternalLowerThanInternalNotAdded(t *testing.T) {
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at height 95 (lower than internal, should not trigger failover)
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 95, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 95, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	_, nodeName, decision := selector.GetBestNode("pocket", "api")
+	_, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	// Should select internal (95 > 100 + 2 = false)
 	if nodeName != "node-1" {
@@ -649,12 +649,12 @@ func TestSelectorNoInternalsOnlyExternals(t *testing.T) {
 	// No internal nodes in heightStore
 
 	// External at height 100
-	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
-	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com", 100, 20*time.Millisecond)
+	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com")
+	endpointStore.MarkValidated("external-1", "https://ring1.example.com", "pocket", "rest", "https://ext1.example.com", 100, 20*time.Millisecond)
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
-	metrics, nodeName, decision := selector.GetBestNode("pocket", "api")
+	metrics, nodeName, decision := selector.GetBestNode("pocket", "rest")
 
 	if metrics == nil {
 		t.Fatal("Expected metrics to be returned")
@@ -694,7 +694,7 @@ func TestSelector_HealthFilter_ExcludesUnhealthy(t *testing.T) {
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
 
-	m, nodeName, decision := sel.GetBestNode("pocket", "api")
+	m, nodeName, decision := sel.GetBestNode("pocket", "rest")
 
 	if m == nil {
 		t.Fatal("expected node to be selected")
@@ -722,7 +722,7 @@ func TestSelector_HealthFilter_AllUnhealthy(t *testing.T) {
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("expected nil when all nodes are unhealthy")
 	}
@@ -740,7 +740,7 @@ func TestSelector_HealthFilter_NeverChecked(t *testing.T) {
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("expected nil when node has never been health-checked")
 	}
@@ -763,7 +763,7 @@ func TestSelector_HealthFilter_IndependentProtocols(t *testing.T) {
 	sel.SetHealthStore(healthStore)
 
 	// API should fail.
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("expected nil for unhealthy api")
 	}
@@ -788,7 +788,7 @@ func TestSelector_HealthFilter_NotSet_NoFiltering(t *testing.T) {
 	// No HealthStore — V1 mode.
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node without health filtering")
 	}
@@ -810,7 +810,7 @@ func TestSelector_HealthFilter_RecoveredNode(t *testing.T) {
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
 
-	m, _, _ := sel.GetBestNode("pocket", "api")
+	m, _, _ := sel.GetBestNode("pocket", "rest")
 	if m != nil {
 		t.Fatal("expected nil while unhealthy")
 	}
@@ -818,7 +818,7 @@ func TestSelector_HealthFilter_RecoveredNode(t *testing.T) {
 	// Recover.
 	healthStore.SetHealthy("pocket", "node-1", "rest")
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node after recovery")
 	}
@@ -844,7 +844,7 @@ func TestSelector_HealthFilter_PrefersHealthyOverHigher(t *testing.T) {
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
 
-	m, nodeName, _ := sel.GetBestNode("pocket", "api")
+	m, nodeName, _ := sel.GetBestNode("pocket", "rest")
 	if m == nil {
 		t.Fatal("expected node to be selected")
 	}
@@ -853,75 +853,6 @@ func TestSelector_HealthFilter_PrefersHealthyOverHigher(t *testing.T) {
 	}
 	if m.Height != 99 {
 		t.Fatalf("expected height 99, got %d", m.Height)
-	}
-}
-
-// --- normalizeProtocol tests ---
-
-func TestNormalizeProtocol(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		endpointType string
-		want         string
-	}{
-		{
-			name:         "api maps to rest",
-			endpointType: "api",
-			want:         "rest",
-		},
-		{
-			name:         "rpc unchanged",
-			endpointType: "rpc",
-			want:         "rpc",
-		},
-		{
-			name:         "grpc unchanged",
-			endpointType: "grpc",
-			want:         "grpc",
-		},
-		{
-			name:         "jsonrpc unchanged",
-			endpointType: "jsonrpc",
-			want:         "jsonrpc",
-		},
-		{
-			name:         "http unchanged",
-			endpointType: "http",
-			want:         "http",
-		},
-		{
-			name:         "websocket unchanged",
-			endpointType: "websocket",
-			want:         "websocket",
-		},
-		{
-			name:         "empty string unchanged",
-			endpointType: "",
-			want:         "",
-		},
-		{
-			name:         "rest unchanged (no double mapping)",
-			endpointType: "rest",
-			want:         "rest",
-		},
-		{
-			name:         "unknown type unchanged",
-			endpointType: "graphql",
-			want:         "graphql",
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := normalizeProtocol(tt.endpointType)
-			if got != tt.want {
-				t.Errorf("normalizeProtocol(%q) = %q, want %q", tt.endpointType, got, tt.want)
-			}
-		})
 	}
 }
 
