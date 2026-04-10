@@ -25,7 +25,7 @@ func newCheckerHTTPClient() *http.Client {
 }
 
 // recordCheckError increments the error counter and logs at Warn level.
-// network and node identify the source; endpointType is "api", "rpc", or "grpc";
+// network and node identify the source; endpointType is the V2 protocol name;
 // errorType is a short label (e.g. "network", "http_status").
 func recordCheckError(logger *zap.Logger, network, node, endpointType, errorType string, err error) {
 	metrics.HeightCheckErrors.WithLabelValues(network, node, endpointType, errorType).Inc()

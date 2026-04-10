@@ -165,7 +165,6 @@ func (n *MultiChainNetwork) HeightCheckProtocol() string {
 }
 
 // GetEnabledTypes returns all unique protocol names across all network endpoints.
-// This replaces the V1 approach of global API/RPC/GRPC boolean flags.
 func (c *MultiChainConfig) GetEnabledTypes() []string {
 	seen := make(map[string]bool)
 	var types []string

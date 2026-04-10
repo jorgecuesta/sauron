@@ -1,8 +1,5 @@
-api: true
-rpc: true
-grpc: true
-auth: true
 listen: ":3000"
+auth: true
 
 timeouts:
   health_check: 5s
@@ -18,29 +15,36 @@ rate_limit:
   burst: 20
 
 networks:
-  - name: "pocket"
-    api: "http://primary:8080"
-    api_listen: ":8080"
-    rpc: "http://primary:8081"
-    rpc_listen: ":8081"
-    grpc: "primary:8082"
-    grpc_listen: ":8082"
-    grpc_insecure: true
+  - name: pocket
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+        advertise: "http://primary:8080"
+      - protocol: rpc
+        listen: ":8081"
+        advertise: "http://primary:8081"
+      - protocol: grpc
+        listen: ":8082"
+        advertise: "primary:8082"
 
 internals:
   - name: seed-one
-    api: "https://api-seed-one.infra.pocket.network"
-    rpc: "https://rpc-seed-one.infra.pocket.network"
-    grpc: "grpc-seed-one.infra.pocket.network:443"
-    grpc_insecure: false
-    network: "pocket"
+    network: pocket
+    endpoints:
+      rest: "https://api-seed-one.infra.pocket.network"
+      rpc: "https://rpc-seed-one.infra.pocket.network"
+      grpc: "grpc-seed-one.infra.pocket.network:443"
 
   - name: seed-two
-    api: "https://api-seed-two.infra.pocket.network"
-    rpc: "https://rpc-seed-two.infra.pocket.network"
-    grpc: "grpc-seed-two.infra.pocket.network:443"
-    grpc_insecure: false
-    network: "pocket"
+    network: pocket
+    endpoints:
+      rest: "https://api-seed-two.infra.pocket.network"
+      rpc: "https://rpc-seed-two.infra.pocket.network"
+      grpc: "grpc-seed-two.infra.pocket.network:443"
 
 externals:
   - name: secondary-ring
@@ -51,6 +55,4 @@ externals:
 users:
   - name: test-user
     token: "test-token-123"
-    api: true
-    rpc: true
-    grpc: true
+    permissions: all

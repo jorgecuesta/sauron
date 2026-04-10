@@ -10,11 +10,11 @@ func TestHeightStore_UpdateAndGetByNetwork(t *testing.T) {
 	t.Parallel()
 	s := NewHeightStore()
 
-	s.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	s.Update("pocket", "node-2", "api", 200, 20*time.Millisecond, "internal")
-	s.Update("pocket", "node-3", "api", 150, 15*time.Millisecond, "internal")
+	s.Update("pocket", "node-1", "rest", 100, 10*time.Millisecond, "internal")
+	s.Update("pocket", "node-2", "rest", 200, 20*time.Millisecond, "internal")
+	s.Update("pocket", "node-3", "rest", 150, 15*time.Millisecond, "internal")
 
-	nodes := s.GetByNetwork("pocket", "api")
+	nodes := s.GetByNetwork("pocket", "rest")
 	if len(nodes) != 3 {
 		t.Fatalf("expected 3 nodes, got %d", len(nodes))
 	}
@@ -56,10 +56,10 @@ func TestHeightStore_LatencyHistory(t *testing.T) {
 
 	// Insert 15 latency samples; only the last 10 should be kept.
 	for i := 1; i <= 15; i++ {
-		s.Update("pocket", "node-1", "api", int64(i*100), time.Duration(i)*time.Millisecond, "internal")
+		s.Update("pocket", "node-1", "rest", int64(i*100), time.Duration(i)*time.Millisecond, "internal")
 	}
 
-	nodes := s.GetByNetwork("pocket", "api")
+	nodes := s.GetByNetwork("pocket", "rest")
 	m, ok := nodes["node-1"]
 	if !ok {
 		t.Fatal("node-1 not found")
@@ -85,11 +85,11 @@ func TestHeightStore_AvgLatency(t *testing.T) {
 	s := NewHeightStore()
 
 	// 3 samples: 10ms, 20ms, 30ms → average = 20ms
-	s.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	s.Update("pocket", "node-1", "api", 100, 20*time.Millisecond, "internal")
-	s.Update("pocket", "node-1", "api", 100, 30*time.Millisecond, "internal")
+	s.Update("pocket", "node-1", "rest", 100, 10*time.Millisecond, "internal")
+	s.Update("pocket", "node-1", "rest", 100, 20*time.Millisecond, "internal")
+	s.Update("pocket", "node-1", "rest", 100, 30*time.Millisecond, "internal")
 
-	nodes := s.GetByNetwork("pocket", "api")
+	nodes := s.GetByNetwork("pocket", "rest")
 	m := nodes["node-1"]
 	if m == nil {
 		t.Fatal("node-1 not found")
@@ -132,13 +132,13 @@ func TestHeightStore_FiltersCorrectly(t *testing.T) {
 	s := NewHeightStore()
 
 	// Different networks
-	s.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	s.Update("pocket-beta", "node-1", "api", 200, 10*time.Millisecond, "internal")
+	s.Update("pocket", "node-1", "rest", 100, 10*time.Millisecond, "internal")
+	s.Update("pocket-beta", "node-1", "rest", 200, 10*time.Millisecond, "internal")
 
 	// Different endpoint types
 	s.Update("pocket", "node-2", "rpc", 300, 10*time.Millisecond, "internal")
 
-	pocketAPI := s.GetByNetwork("pocket", "api")
+	pocketAPI := s.GetByNetwork("pocket", "rest")
 	if len(pocketAPI) != 1 {
 		t.Errorf("expected 1 pocket/api node, got %d", len(pocketAPI))
 	}
@@ -146,7 +146,7 @@ func TestHeightStore_FiltersCorrectly(t *testing.T) {
 		t.Error("expected node-1 in pocket/api")
 	}
 
-	betaAPI := s.GetByNetwork("pocket-beta", "api")
+	betaAPI := s.GetByNetwork("pocket-beta", "rest")
 	if len(betaAPI) != 1 {
 		t.Errorf("expected 1 pocket-beta/api node, got %d", len(betaAPI))
 	}
@@ -178,9 +178,9 @@ func TestHeightStore_ConcurrentUpdates(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			nodeName := "node-" + string(rune('A'+i%26))
-			s.Update("pocket", nodeName, "api", int64(i*10), time.Duration(i)*time.Millisecond, "internal")
-			s.GetByNetwork("pocket", "api")
-			s.GetHighestHeight("pocket", "api")
+			s.Update("pocket", nodeName, "rest", int64(i*10), time.Duration(i)*time.Millisecond, "internal")
+			s.GetByNetwork("pocket", "rest")
+			s.GetHighestHeight("pocket", "rest")
 		}()
 	}
 
