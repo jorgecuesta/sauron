@@ -1,0 +1,107 @@
+# Multi-chain local test config
+# Cosmos (beta-lego), EVM (Ethereum mainnet), Solana (mainnet), Custom (Bitcoin via mempool.space)
+listen: ":3000"
+auth: false
+
+timeouts:
+  health_check: 10s
+  proxy: 60s
+
+grpc_keepalive:
+  time: 600s
+  timeout: 20s
+
+rate_limit:
+  enabled: false
+
+redis:
+  enabled: false
+
+# ─── Networks ────────────────────────────────────────────────────────────────
+
+networks:
+  # Cosmos — Pocket beta-lego testnet
+  - name: pocket-beta
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 10s
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+        advertise: "http://localhost:8080"
+      - protocol: rpc
+        listen: ":8081"
+        advertise: "http://localhost:8081"
+
+  # EVM — Ethereum mainnet via PublicNode
+  - name: ethereum
+    type: evm
+    mode: latest
+    height_check:
+      interval: 12s
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9080"
+        advertise: "http://localhost:9080"
+
+  # Solana — mainnet-beta
+  - name: solana
+    type: solana
+    height_check:
+      interval: 5s
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9181"
+        advertise: "http://localhost:9181"
+
+  # Custom — Bitcoin block height via mempool.space REST API
+  - name: bitcoin
+    type: custom
+    height_check:
+      interval: 30s
+      method: GET
+      url_path: /api/blocks/tip/height
+      response_path: "."
+      response_format: integer
+    endpoints:
+      - protocol: http
+        listen: ":9280"
+        advertise: "http://localhost:9280"
+
+# ─── Internal Nodes ──────────────────────────────────────────────────────────
+
+internals:
+  # Cosmos nodes
+  - name: validator-one
+    network: pocket-beta
+    endpoints:
+      rest: "https://api-validator-one-lego.beta.infra.pocket.network"
+      rpc: "https://rpc-validator-one-lego.beta.infra.pocket.network"
+
+  - name: seed-one
+    network: pocket-beta
+    endpoints:
+      rest: "https://api-seed-one-lego.beta.infra.pocket.network"
+      rpc: "https://rpc-seed-one-lego.beta.infra.pocket.network"
+
+  # EVM node
+  - name: eth-publicnode
+    network: ethereum
+    endpoints:
+      jsonrpc: "https://ethereum-rpc.publicnode.com"
+
+  # Solana node
+  - name: sol-mainnet
+    network: solana
+    endpoints:
+      jsonrpc: "https://api.mainnet-beta.solana.com"
+
+  # Bitcoin (custom) node
+  - name: btc-mempool
+    network: bitcoin
+    endpoints:
+      http: "https://mempool.space"
+
+externals: []
+users: []
