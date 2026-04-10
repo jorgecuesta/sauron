@@ -1,11 +1,7 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -153,13 +149,6 @@ func NewHTTPProxy(
 	return p
 }
 
-// isWebSocketRequest checks if this is a WebSocket upgrade request
-func isWebSocketRequest(r *http.Request) bool {
-	connection := strings.ToLower(r.Header.Get("Connection"))
-	upgrade := strings.ToLower(r.Header.Get("Upgrade"))
-	return strings.Contains(connection, "upgrade") && upgrade == "websocket"
-}
-
 // ServeHTTP handles the proxy request
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -169,7 +158,7 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
 		zap.String("type", p.endpointType),
-		zap.Bool("websocket", isWebSocketRequest(r)),
+		zap.Bool("websocket", IsWebSocketRequest(r)),
 	)
 
 	// Use the network this proxy is configured for (no detection needed!)
@@ -218,7 +207,7 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle WebSocket upgrade requests separately.
 	// H9 FIX: pass nodeMetrics so handleWebSocket doesn't call GetBestNode again.
-	if isWebSocketRequest(r) {
+	if IsWebSocketRequest(r) {
 		p.handleWebSocket(w, r, target, nodeName, network, start, decision, nodeMetrics)
 		return
 	}
@@ -316,15 +305,14 @@ func (rt *responseTracker) Write(b []byte) (int, error) {
 }
 
 // handleWebSocket handles WebSocket proxy requests.
-// H9 FIX: accepts nodeMetrics directly instead of calling GetBestNode again.
+// Delegates the actual proxying to the shared ProxyWebSocket function,
+// then records metrics based on the outcome.
 func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision, nodeMetrics *storage.NodeMetrics) {
 	p.logger.Info("Handling WebSocket upgrade",
-		zap.String("target_host", target.Host),
-		zap.String("target_scheme", target.Scheme),
-		zap.String("path", r.URL.Path),
+		zap.String("node", nodeName),
+		zap.String("network", network),
 	)
 
-	// H9 FIX: Use the already-selected nodeMetrics directly — no second GetBestNode call.
 	if !nodeMetrics.WebSocketAvailable {
 		p.logger.Warn("Selected node does not support WebSocket",
 			zap.String("node", nodeName),
@@ -335,160 +323,33 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 		return
 	}
 
-	// Hijack the client connection
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		p.logger.Error("ResponseWriter doesn't support hijacking")
-		http.Error(w, "WebSocket not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, clientBuf, err := hijacker.Hijack()
-	if err != nil {
-		p.logger.Error("Failed to hijack connection", zap.Error(err))
-		http.Error(w, "Failed to hijack connection", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = clientConn.Close() }()
-
-	// Build backend WebSocket URL
-	backendScheme := "ws"
-	if target.Scheme == "https" {
-		backendScheme = "wss"
-	}
-	backendURL := backendScheme + "://" + target.Host + r.URL.Path
-	if r.URL.RawQuery != "" {
-		backendURL += "?" + r.URL.RawQuery
-	}
-
-	p.logger.Info("Connecting to backend WebSocket",
-		zap.String("backend_url", backendURL),
-	)
-
-	// Determine the backend address with port
-	backendAddr := target.Host
-	if target.Port() == "" {
-		// Add default port if not specified
-		if target.Scheme == "https" {
-			backendAddr = target.Hostname() + ":443"
-		} else {
-			backendAddr = target.Hostname() + ":80"
-		}
-	}
-
-	// Connect to backend WebSocket
-	var backendConn net.Conn
-	if target.Scheme == "https" {
-		// Use TLS for wss://
-		tlsConfig := &tls.Config{
-			ServerName: target.Hostname(),
-		}
-		backendConn, err = tls.Dial("tcp", backendAddr, tlsConfig)
-	} else {
-		// Plain TCP for ws://
-		backendConn, err = net.Dial("tcp", backendAddr)
-	}
-
-	if err != nil {
-		p.logger.Error("Failed to connect to backend", zap.Error(err))
-		_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "502", "backend_connect_error").Inc()
-		return
-	}
-	defer func() { _ = backendConn.Close() }()
-
-	// Update the Host header to match the backend
-	r.Host = target.Host
-	r.Header.Set("Host", target.Host)
-
-	// Forward the upgrade request to backend
-	err = r.Write(backendConn)
-	if err != nil {
-		p.logger.Error("Failed to write upgrade request to backend", zap.Error(err))
-		_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "502", "upgrade_forward_error").Inc()
-		return
-	}
-
-	// Read backend's upgrade response
-	backendBuf := bufio.NewReader(backendConn)
-	resp, err := http.ReadResponse(backendBuf, r)
-	if err != nil {
-		p.logger.Error("Failed to read upgrade response from backend", zap.Error(err))
-		_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "502", "upgrade_response_error").Inc()
-		return
-	}
-
-	// Forward the response to client
-	err = resp.Write(clientConn)
-	if err != nil {
-		p.logger.Error("Failed to write upgrade response to client", zap.Error(err))
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "502", "upgrade_client_error").Inc()
-		return
-	}
-
-	p.logger.Info("WebSocket upgrade successful, starting bidirectional forwarding",
-		zap.Int("response_status", resp.StatusCode),
-	)
-
-	// Bidirectional copy
-	errChan := make(chan error, 2)
-
-	// H9 FIX (bidirectional copy): copy from clientBuf (not clientConn) so that
-	// bytes already buffered by the hijack bufio.ReadWriter are not lost.
-	go func() {
-		n, err := io.Copy(backendConn, clientBuf)
-		p.logger.Debug("Client->Backend copy finished",
-			zap.Int64("bytes", n),
-			zap.Error(err),
-		)
-		errChan <- err
-	}()
-
-	// H9 FIX (bidirectional copy): copy from backendBuf (not backendConn) so that
-	// bytes already buffered while reading the upgrade response are not lost.
-	go func() {
-		n, err := io.Copy(clientConn, backendBuf)
-		p.logger.Debug("Backend->Client copy finished",
-			zap.Int64("bytes", n),
-			zap.Error(err),
-		)
-		errChan <- err
-	}()
-
-	// Wait for one direction to finish (when one closes, the other will follow)
-	err = <-errChan
+	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger)
 	duration := time.Since(start)
 
-	statusStr := strconv.Itoa(resp.StatusCode)
-	metrics.ProxyRequestDuration.WithLabelValues(
-		network,
-		nodeName,
-		p.endpointType,
-		statusStr,
-	).Observe(duration.Seconds())
-
+	statusStr := strconv.Itoa(statusCode)
+	metrics.ProxyRequestDuration.WithLabelValues(network, nodeName, p.endpointType, statusStr).Observe(duration.Seconds())
 	metrics.NodeRequests.WithLabelValues(network, nodeName, p.endpointType, "WEBSOCKET").Inc()
 
-	if err != nil && err != io.EOF {
-		p.logger.Info("WebSocket connection closed with error",
+	if err != nil {
+		// Extract granular error category from WSProxyError.
+		errCategory := "websocket_error"
+		if wsErr, ok := err.(*WSProxyError); ok {
+			errCategory = wsErr.Category
+		}
+		p.logger.Debug("WebSocket proxy error",
+			zap.String("node", nodeName),
+			zap.String("category", errCategory),
 			zap.Error(err),
 			zap.Duration("duration", duration),
 		)
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, "websocket_error").Inc()
+		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, errCategory).Inc()
 	} else {
-		p.logger.Info("WebSocket connection closed normally",
+		p.logger.Debug("WebSocket proxied",
+			zap.String("network", network),
+			zap.String("node", nodeName),
+			zap.String("type", p.endpointType),
 			zap.Duration("duration", duration),
+			zap.String("selection_reason", decision.Reason),
 		)
 	}
-
-	p.logger.Debug("WebSocket proxied",
-		zap.String("network", network),
-		zap.String("node", nodeName),
-		zap.String("type", p.endpointType),
-		zap.String("path", r.URL.Path),
-		zap.Duration("duration", duration),
-		zap.String("selection_reason", decision.Reason),
-	)
 }
