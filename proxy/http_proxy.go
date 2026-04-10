@@ -44,7 +44,7 @@ func singleJoiningSlash(a, b string) string {
 // The gates through which the Ringwraiths pass
 type HTTPProxy struct {
 	selector       *selector.Selector
-	configLoader   *config.Loader
+	configLoader   *config.MultiChainLoader
 	endpointStore  *storage.ExternalEndpointStore
 	transport      *http.Transport
 	reverseProxy   *httputil.ReverseProxy
@@ -57,7 +57,7 @@ type HTTPProxy struct {
 // NewHTTPProxy creates a new HTTP proxy for a specific network
 func NewHTTPProxy(
 	selector *selector.Selector,
-	configLoader *config.Loader,
+	configLoader *config.MultiChainLoader,
 	endpointStore *storage.ExternalEndpointStore,
 	logger *zap.Logger,
 	endpointType string,

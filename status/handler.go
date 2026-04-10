@@ -19,7 +19,7 @@ import (
 // The Palantír - how others peer into this tower
 type Handler struct {
 	selector     *selector.Selector
-	configLoader *config.Loader
+	configLoader *config.MultiChainLoader
 	logger       *zap.Logger
 	rateLimiter  *RateLimiter
 }
@@ -27,15 +27,14 @@ type Handler struct {
 // StatusResponse represents the response format
 // Returns the maximum height and advertised endpoints for connecting to this Sauron
 type StatusResponse struct {
-	Height       int64  `json:"height"`                  // Maximum height across all endpoint types
-	API          string `json:"api,omitempty"`           // Advertised API endpoint URL
-	RPC          string `json:"rpc,omitempty"`           // Advertised RPC endpoint URL
-	GRPC         string `json:"grpc,omitempty"`          // Advertised gRPC endpoint URL
-	GRPCInsecure bool   `json:"grpc_insecure,omitempty"` // Whether advertised gRPC endpoint uses insecure (no TLS)
+	Height int64  `json:"height"`         // Maximum height across all endpoint types
+	API    string `json:"api,omitempty"`  // Advertised API endpoint URL
+	RPC    string `json:"rpc,omitempty"`  // Advertised RPC endpoint URL
+	GRPC   string `json:"grpc,omitempty"` // Advertised gRPC endpoint URL
 }
 
 // NewHandler creates a new status handler
-func NewHandler(selector *selector.Selector, configLoader *config.Loader, logger *zap.Logger) *Handler {
+func NewHandler(selector *selector.Selector, configLoader *config.MultiChainLoader, logger *zap.Logger) *Handler {
 	cfg := configLoader.Get()
 
 	var rateLimiter *RateLimiter
@@ -197,19 +196,14 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Add advertised endpoints based on enabled types
 	if networkConfig != nil {
 		for _, endpointType := range enabledTypes {
-			switch endpointType {
-			case "api":
-				if networkConfig.API != "" {
-					resp.API = networkConfig.API
-				}
-			case "rpc":
-				if networkConfig.RPC != "" {
-					resp.RPC = networkConfig.RPC
-				}
-			case "grpc":
-				if networkConfig.GRPC != "" {
-					resp.GRPC = networkConfig.GRPC
-					resp.GRPCInsecure = networkConfig.GRPCInsecure
+			if ep := networkConfig.FindEndpoint(endpointType); ep != nil && ep.Advertise != "" {
+				switch endpointType {
+				case "api", "rest":
+					resp.API = ep.Advertise
+				case "rpc":
+					resp.RPC = ep.Advertise
+				case "grpc":
+					resp.GRPC = ep.Advertise
 				}
 			}
 		}

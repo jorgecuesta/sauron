@@ -393,10 +393,10 @@ func TestSelector_WithArchivalAndSyncFilters(t *testing.T) {
 	oracleStore := storage.NewOracleStore()
 	configLoader := createTestConfig(t, 2)
 
-	// 3 nodes all at height 100.
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 30*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-3", "api", 90, 40*time.Millisecond, "internal") // drifted
+	// 3 nodes all at height 100. Heights stored under "rpc" (cosmos height-check protocol).
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-3", "rpc", 90, 40*time.Millisecond, "internal") // drifted
 
 	// node-1 is archival, node-2 is not, node-3 is archival.
 	archivalStore.SetArchival("pocket", "node-1")
@@ -438,8 +438,8 @@ func TestSelector_FiltersDisabled_NoFiltering(t *testing.T) {
 	heightStore := storage.NewHeightStore()
 	configLoader := createTestConfig(t, 2)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 30*time.Millisecond, "internal")
 
 	// No filters set — V1 behavior.
 	sel := NewSelector(heightStore, nil, configLoader, logger)

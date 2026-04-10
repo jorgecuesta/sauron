@@ -8,6 +8,7 @@ import (
 
 	"sauron/adapter"
 	"sauron/config"
+	"sauron/internal/grpcutil"
 	"sauron/internal/urlutil"
 	"sauron/metrics"
 	"sauron/storage"
@@ -15,6 +16,8 @@ import (
 	"github.com/alitto/pond/v2"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/keepalive"
 )
 
 // MultiChainScheduler coordinates periodic health and height checks using the adapter engine.
@@ -30,7 +33,8 @@ type MultiChainScheduler struct {
 	cache         *storage.Cache
 	endpointStore *storage.ExternalEndpointStore
 	extChecker    *ExternalChecker
-	configLoader  *config.Loader
+	oracleChecker *OracleChecker
+	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
 	timeout       time.Duration
 }
@@ -43,11 +47,11 @@ func NewMultiChainScheduler(
 	healthStore *storage.HealthStore,
 	cache *storage.Cache,
 	endpointStore *storage.ExternalEndpointStore,
-	configLoader *config.Loader,
+	oracleChecker *OracleChecker,
+	configLoader *config.MultiChainLoader,
 	pool pond.Pool,
 	logger *zap.Logger,
 ) *MultiChainScheduler {
-	// External checker still uses v1 code — external ring protocol is unchanged.
 	extChecker := NewExternalChecker(heightStore, endpointStore, configLoader, logger)
 
 	return &MultiChainScheduler{
@@ -63,6 +67,7 @@ func NewMultiChainScheduler(
 		cache:         cache,
 		endpointStore: endpointStore,
 		extChecker:    extChecker,
+		oracleChecker: oracleChecker,
 		configLoader:  configLoader,
 		logger:        logger,
 		timeout:       5 * time.Second,
@@ -99,6 +104,21 @@ func (s *MultiChainScheduler) Start() error {
 		return fmt.Errorf("multi-chain scheduler: failed to add recovery cron: %w", err)
 	}
 
+	// Schedule oracle checks every 30 seconds if oracles are configured.
+	if s.oracleChecker != nil && len(s.oracleChecker.Networks()) > 0 {
+		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+			defer cancel()
+			s.oracleChecker.CheckAll(ctx, s.timeout)
+		})
+		if err != nil {
+			return fmt.Errorf("multi-chain scheduler: failed to add oracle check cron: %w", err)
+		}
+		s.logger.Info("Oracle checker scheduled",
+			zap.Strings("networks", s.oracleChecker.Networks()),
+		)
+	}
+
 	s.cron.Start()
 	s.logger.Info("Multi-chain scheduler started",
 		zap.Duration("health_check_timeout", s.timeout),
@@ -116,7 +136,8 @@ func (s *MultiChainScheduler) Stop() {
 	s.logger.Info("Multi-chain scheduler stopped")
 }
 
-// checkInternalNodes runs height checks for all internal nodes using the adapter engine.
+// checkInternalNodes runs height and health checks for all internal nodes
+// using the adapter engine and V2 config types directly.
 func (s *MultiChainScheduler) checkInternalNodes() {
 	cfg := s.configLoader.Get()
 	s.timeout = cfg.Timeouts.HealthCheck
@@ -124,7 +145,6 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 	for _, node := range cfg.Internals {
 		node := node
 
-		// Find the network config to get the adapter type.
 		network := cfg.FindNetwork(node.Network)
 		if network == nil {
 			s.logger.Warn("Node references unknown network",
@@ -135,20 +155,20 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 		}
 
 		// Get the adapter for this network type.
-		// For v1 config compatibility, cosmos is the only supported type.
-		adpt, err := s.registry.Get("cosmos")
+		adpt, err := s.registry.Get(network.Type)
 		if err != nil {
 			s.logger.Warn("No adapter for network type",
 				zap.String("network", node.Network),
+				zap.String("type", network.Type),
 				zap.Error(err),
 			)
 			continue
 		}
 
-		// Build adapter NetworkConfig from v1 config.
-		netCfg := v1NetworkToAdapterConfig(network)
+		// Build adapter configs from V2 types.
+		netCfg := V2NetworkToAdapterConfig(network)
 
-		// Get height check config.
+		// Run height check.
 		checkCfg, err := adpt.HeightCheck(netCfg)
 		if err != nil {
 			s.logger.Warn("Failed to get height check config",
@@ -159,37 +179,39 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 		}
 
 		// Determine the node URL for the height check protocol.
-		nodeURL := v1NodeURL(node, checkCfg.Protocol)
+		nodeURL := node.Endpoints[checkCfg.Protocol]
 		if nodeURL == "" {
+			s.logger.Debug("Node has no endpoint for height check protocol",
+				zap.String("node", node.Name),
+				zap.String("protocol", checkCfg.Protocol),
+			)
 			continue
 		}
 
-		// Skip gRPC height checks — they use the existing GRPCChecker path.
-		if checkCfg.IsGRPC {
-			continue
+		// Skip gRPC height checks — engine only handles HTTP.
+		if !checkCfg.IsGRPC {
+			_ = s.pool.Go(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+				defer cancel()
+
+				start := time.Now()
+				height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
+				latency := time.Since(start)
+
+				if err != nil {
+					recordCheckError(s.logger, node.Network, node.Name, checkCfg.Protocol, "engine", err)
+					metrics.NodeAvailable.WithLabelValues(node.Network, node.Name, checkCfg.Protocol).Set(0)
+					s.healthStore.SetUnhealthy(node.Network, node.Name, checkCfg.Protocol, err.Error())
+					return
+				}
+
+				recordCheckSuccess(s.heightStore, s.cache, s.logger, ctx, node.Network, node.Name, checkCfg.Protocol, height, latency)
+				s.healthStore.SetHealthy(node.Network, node.Name, checkCfg.Protocol)
+			})
 		}
-
-		_ = s.pool.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-			defer cancel()
-
-			start := time.Now()
-			height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
-			latency := time.Since(start)
-
-			if err != nil {
-				recordCheckError(s.logger, node.Network, node.Name, checkCfg.Protocol, "engine", err)
-				metrics.NodeAvailable.WithLabelValues(node.Network, node.Name, checkCfg.Protocol).Set(0)
-				s.healthStore.SetUnhealthy(node.Network, node.Name, checkCfg.Protocol, err.Error())
-				return
-			}
-
-			recordCheckSuccess(s.heightStore, s.cache, s.logger, ctx, node.Network, node.Name, checkCfg.Protocol, height, latency)
-			s.healthStore.SetHealthy(node.Network, node.Name, checkCfg.Protocol)
-		})
 
 		// Run health checks for other protocols.
-		nodeCfg := v1NodeToAdapterConfig(node)
+		nodeCfg := v2NodeToAdapterConfig(node)
 		healthChecks, err := adpt.HealthChecks(netCfg, nodeCfg)
 		if err != nil {
 			s.logger.Warn("Failed to get health check configs",
@@ -207,34 +229,123 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 				continue
 			}
 
-			// Skip gRPC and WebSocket health checks — not yet implemented in engine.
-			if hc.IsGRPC || hc.IsWebSocket {
-				continue
-			}
-
-			hcNodeURL := v1NodeURL(node, hc.Protocol)
+			hcNodeURL := node.Endpoints[hc.Protocol]
 			if hcNodeURL == "" {
 				continue
 			}
 
-			_ = s.pool.Go(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-				defer cancel()
-
-				err := s.engine.CheckHealth(ctx, hc, urlutil.NormalizeURL(hcNodeURL))
-				if err != nil {
-					s.healthStore.SetUnhealthy(node.Network, node.Name, hc.Protocol, err.Error())
-					s.logger.Debug("Health check failed",
-						zap.String("node", node.Name),
-						zap.String("protocol", hc.Protocol),
-						zap.Error(err),
-					)
-					return
-				}
-				s.healthStore.SetHealthy(node.Network, node.Name, hc.Protocol)
-			})
+			if hc.IsGRPC {
+				s.scheduleGRPCHealthCheck(node, hcNodeURL, hc.Protocol)
+			} else if hc.IsWebSocket {
+				s.scheduleWebSocketHealthCheck(node, hcNodeURL, hc.Protocol)
+			} else {
+				s.scheduleHTTPHealthCheck(node, hcNodeURL, hc)
+			}
 		}
 	}
+}
+
+// scheduleHTTPHealthCheck runs an HTTP health check via the adapter engine.
+func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode, nodeURL string, hc adapter.HealthCheckConfig) {
+	_ = s.pool.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		defer cancel()
+
+		err := s.engine.CheckHealth(ctx, hc, urlutil.NormalizeURL(nodeURL))
+		if err != nil {
+			s.healthStore.SetUnhealthy(node.Network, node.Name, hc.Protocol, err.Error())
+			s.logger.Debug("Health check failed",
+				zap.String("node", node.Name),
+				zap.String("protocol", hc.Protocol),
+				zap.Error(err),
+			)
+			return
+		}
+		s.healthStore.SetHealthy(node.Network, node.Name, hc.Protocol)
+	})
+}
+
+// scheduleGRPCHealthCheck verifies that a gRPC endpoint is reachable by
+// dialing and waiting for the connection to reach the READY state.
+func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode, grpcAddr string, protocol string) {
+	_ = s.pool.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		defer cancel()
+
+		cfg := s.configLoader.Get()
+		ka := keepalive.ClientParameters{
+			Time:                cfg.GRPCKeepalive.Time,
+			Timeout:             cfg.GRPCKeepalive.Timeout,
+			PermitWithoutStream: cfg.GRPCKeepalive.PermitWithoutStream,
+		}
+
+		conn, err := grpcutil.NewConnection(grpcAddr, node.GRPCInsecure, ka)
+		if err != nil {
+			s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, err.Error())
+			s.logger.Debug("gRPC health check: dial failed",
+				zap.String("node", node.Name),
+				zap.String("addr", grpcAddr),
+				zap.Error(err),
+			)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		// Wait for the connection to reach READY state.
+		// gRPC connections transition: IDLE → CONNECTING → READY (or TRANSIENT_FAILURE).
+		// We poll state changes until we reach a terminal outcome or the context expires.
+		conn.Connect()
+		for {
+			state := conn.GetState()
+			if state == connectivity.Ready {
+				s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+				return
+			}
+			if state == connectivity.TransientFailure || state == connectivity.Shutdown {
+				errMsg := fmt.Sprintf("gRPC connection state: %s", state)
+				s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, errMsg)
+				s.logger.Debug("gRPC health check: not ready",
+					zap.String("node", node.Name),
+					zap.String("state", state.String()),
+				)
+				return
+			}
+			// Still transitioning (IDLE or CONNECTING) — wait for next state change.
+			if !conn.WaitForStateChange(ctx, state) {
+				// Context expired before reaching READY.
+				s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, "gRPC dial timeout: did not reach READY")
+				s.logger.Debug("gRPC health check: timeout",
+					zap.String("node", node.Name),
+					zap.String("addr", grpcAddr),
+				)
+				return
+			}
+		}
+	})
+}
+
+// scheduleWebSocketHealthCheck verifies that a WebSocket endpoint is reachable
+// using the existing CheckWebSocket function.
+func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL string, protocol string) {
+	_ = s.pool.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		defer cancel()
+
+		// CheckWebSocket expects an HTTP URL and converts to WS internally.
+		// For nodes that have a separate websocket endpoint, the URL is the RPC URL.
+		// Find the RPC URL if this is a websocket check on a Cosmos node.
+		checkURL := wsURL
+		if rpcURL, ok := node.Endpoints["rpc"]; ok && protocol == "websocket" {
+			checkURL = rpcURL
+		}
+
+		ok := CheckWebSocket(ctx, checkURL, s.logger)
+		if ok {
+			s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+		} else {
+			s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, "websocket check failed")
+		}
+	})
 }
 
 // checkExternalRings delegates to the existing ExternalChecker.
@@ -266,7 +377,7 @@ func (s *MultiChainScheduler) checkExternalRings() {
 	}
 }
 
-func (s *MultiChainScheduler) getAllNetworks(cfg *config.Config) []string {
+func (s *MultiChainScheduler) getAllNetworks(cfg *config.MultiChainConfig) []string {
 	networksMap := make(map[string]bool)
 	for _, node := range cfg.Internals {
 		networksMap[node.Network] = true
@@ -293,44 +404,44 @@ func (s *MultiChainScheduler) recoverFailedEndpoints() {
 	s.extChecker.UpdateEndpointMetrics()
 }
 
-// v1NetworkToAdapterConfig converts a v1 Network config to the adapter's NetworkConfig.
-func v1NetworkToAdapterConfig(net *config.Network) adapter.NetworkConfig {
-	return adapter.NetworkConfig{
+// V2NetworkToAdapterConfig converts a V2 MultiChainNetwork to the adapter's NetworkConfig.
+func V2NetworkToAdapterConfig(net *config.MultiChainNetwork) adapter.NetworkConfig {
+	cfg := adapter.NetworkConfig{
 		Name: net.Name,
-		Type: "cosmos", // v1 only supports cosmos
+		Type: net.Type,
+		Mode: net.Mode,
 	}
+
+	// Map endpoints.
+	for _, ep := range net.Endpoints {
+		cfg.Endpoints = append(cfg.Endpoints, adapter.EndpointConfig{
+			Protocol: ep.Protocol,
+			Listen:   ep.Listen,
+		})
+	}
+
+	// Map height check overrides for custom adapter type.
+	if net.HeightCheck != nil {
+		cfg.HeightCheck = &adapter.HeightCheckOverride{
+			Protocol:       net.HeightCheck.Protocol,
+			Method:         net.HeightCheck.Method,
+			URLPath:        net.HeightCheck.URLPath,
+			Headers:        net.HeightCheck.Headers,
+			Body:           net.HeightCheck.Body,
+			ResponsePath:   net.HeightCheck.ResponsePath,
+			ResponseFormat: net.HeightCheck.ResponseFormat,
+		}
+	}
+
+	return cfg
 }
 
-// v1NodeToAdapterConfig converts a v1 Node config to the adapter's NodeConfig.
-func v1NodeToAdapterConfig(node config.Node) adapter.NodeConfig {
-	endpoints := make(map[string]string)
-	if node.API != "" {
-		endpoints["rest"] = node.API
-	}
-	if node.RPC != "" {
-		endpoints["rpc"] = node.RPC
-	}
-	if node.GRPC != "" {
-		endpoints["grpc"] = node.GRPC
-	}
+// v2NodeToAdapterConfig converts a V2 MultiChainNode to the adapter's NodeConfig.
+func v2NodeToAdapterConfig(node config.MultiChainNode) adapter.NodeConfig {
 	return adapter.NodeConfig{
 		Name:     node.Name,
 		Network:  node.Network,
-		Endpoint: endpoints,
-	}
-}
-
-// v1NodeURL returns the URL for a given protocol from a v1 Node config.
-func v1NodeURL(node config.Node, protocol string) string {
-	switch protocol {
-	case "rest":
-		return node.API
-	case "rpc":
-		return node.RPC
-	case "grpc":
-		return node.GRPC
-	default:
-		return ""
+		Endpoint: node.Endpoints,
 	}
 }
 

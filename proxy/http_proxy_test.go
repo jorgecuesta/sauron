@@ -5,12 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"sauron/config"
+	"sauron/internal/testutil"
 	"sauron/selector"
 	"sauron/storage"
 
@@ -21,14 +21,11 @@ import (
 // helpers
 // ---------------------------------------------------------------------------
 
-// createTestConfigLoader writes a minimal YAML file and returns a *config.Loader.
-func createTestConfigLoader(t *testing.T) *config.Loader {
+// createTestConfigLoader returns a *config.MultiChainLoader backed by a minimal V2 YAML config.
+func createTestConfigLoader(t *testing.T) *config.MultiChainLoader {
 	t.Helper()
 
-	content := `
-api: true
-rpc: true
-grpc: false
+	yaml := `
 listen: ":3000"
 external_failover_threshold: 2
 
@@ -38,32 +35,27 @@ timeouts:
 
 networks:
   - name: "testnet"
-    api_listen: ":8080"
-    rpc_listen: ":8081"
-    grpc_listen: ":8082"
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: api
+        listen: ":8080"
+      - protocol: rpc
+        listen: ":8081"
+      - protocol: grpc
+        listen: ":8082"
 
 internals:
   - name: node-1
-    api: "http://127.0.0.1:19999"
-    rpc: "http://127.0.0.1:19998"
-    grpc: "127.0.0.1:19997"
     network: "testnet"
+    endpoints:
+      api: "http://127.0.0.1:19999"
+      rpc: "http://127.0.0.1:19998"
+      grpc: "127.0.0.1:19997"
 `
-	f, err := os.CreateTemp("", "sauron-proxy-test-*.yaml")
-	if err != nil {
-		t.Fatalf("createTestConfigLoader: CreateTemp: %v", err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("createTestConfigLoader: WriteString: %v", err)
-	}
-	_ = f.Close()
-	t.Cleanup(func() { _ = os.Remove(f.Name()) })
-
-	loader, err := config.NewLoader(f.Name(), zap.NewNop())
-	if err != nil {
-		t.Fatalf("createTestConfigLoader: NewLoader: %v", err)
-	}
-	return loader
+	return testutil.NewMultiChainLoader(t, yaml)
 }
 
 // newTestProxy creates a fully-wired HTTPProxy that routes to a backend whose
@@ -174,10 +166,7 @@ func TestConcurrentServeHTTP_NoRace(t *testing.T) {
 
 	// Build a config that points node-1 to the real backend.
 	backendHost := backend.Listener.Addr().String()
-	content := `
-api: true
-rpc: true
-grpc: false
+	yaml := `
 listen: ":3000"
 external_failover_threshold: 2
 
@@ -187,31 +176,27 @@ timeouts:
 
 networks:
   - name: "testnet"
-    api_listen: ":8080"
-    rpc_listen: ":8081"
-    grpc_listen: ":8082"
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: api
+        listen: ":8080"
+      - protocol: rpc
+        listen: ":8081"
+      - protocol: grpc
+        listen: ":8082"
 
 internals:
   - name: node-1
-    api: "http://` + backendHost + `"
-    rpc: "http://` + backendHost + `"
-    grpc: "` + backendHost + `"
     network: "testnet"
+    endpoints:
+      api: "http://` + backendHost + `"
+      rpc: "http://` + backendHost + `"
+      grpc: "` + backendHost + `"
 `
-	f, err := os.CreateTemp("", "sauron-race-test-*.yaml")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("WriteString: %v", err)
-	}
-	_ = f.Close()
-	t.Cleanup(func() { _ = os.Remove(f.Name()) })
-
-	cfgLoader, err := config.NewLoader(f.Name(), zap.NewNop())
-	if err != nil {
-		t.Fatalf("NewLoader: %v", err)
-	}
+	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
 
 	heightStore := storage.NewHeightStore()
 	heightStore.Update("testnet", "node-1", "api", 100, 10*time.Millisecond, "internal")

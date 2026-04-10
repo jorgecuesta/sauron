@@ -1,18 +1,20 @@
 package checker
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"sauron/adapter"
 	"sauron/adapter/cosmos"
 	"sauron/config"
+	"sauron/internal/testutil"
 	"sauron/storage"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 // testMultiChainSetup creates all dependencies for MultiChainScheduler tests.
@@ -31,45 +33,36 @@ func testMultiChainSetup(t *testing.T, nodeURL string) (*MultiChainScheduler, *s
 
 	engine := adapter.NewEngine(&http.Client{Timeout: 2 * time.Second})
 
-	// Write temp config.
+	// Write temp V2 config.
 	cfgYAML := `
 listen: ":3000"
-api: true
-rpc: true
-grpc: false
 timeouts:
   health_check: 5s
   proxy: 60s
 networks:
   - name: pocket
-    api_listen: ":18080"
-    rpc_listen: ":18081"
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":18080"
+      - protocol: rpc
+        listen: ":18081"
 internals:
   - name: seed-one
     network: pocket
-    api: "` + nodeURL + `"
-    rpc: "` + nodeURL + `"
+    endpoints:
+      rest: "` + nodeURL + `"
+      rpc: "` + nodeURL + `"
 `
-	tmpFile, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
-	if err != nil {
-		t.Fatalf("create temp config: %v", err)
-	}
-	if _, err := tmpFile.WriteString(cfgYAML); err != nil {
-		t.Fatalf("write temp config: %v", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		t.Fatalf("close temp config: %v", err)
-	}
-
-	loader, err := config.NewLoader(tmpFile.Name(), zap.NewNop())
-	if err != nil {
-		t.Fatalf("create loader: %v", err)
-	}
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
 
 	// Use a synchronous pool (size 1) for test determinism.
 	pool := newTestPool()
 
-	sched := NewMultiChainScheduler(engine, registry, heightStore, healthStore, cache, endpointStore, loader, pool, zap.NewNop())
+	sched := NewMultiChainScheduler(engine, registry, heightStore, healthStore, cache, endpointStore, nil, loader, pool, zap.NewNop())
 
 	return sched, heightStore, healthStore
 }
@@ -233,11 +226,22 @@ func TestMultiChainScheduler_StartStop(t *testing.T) {
 	sched.Stop()
 }
 
-func TestV1NetworkToAdapterConfig(t *testing.T) {
+func TestV2NetworkToAdapterConfig(t *testing.T) {
 	t.Parallel()
 
-	net := &config.Network{Name: "pocket"}
-	cfg := v1NetworkToAdapterConfig(net)
+	net := &config.MultiChainNetwork{
+		Name: "pocket",
+		Type: "cosmos",
+		HeightCheck: &config.HeightCheckConfig{
+			Protocol: "rpc",
+			Interval: 30 * time.Second,
+		},
+		Endpoints: []config.NetworkEndpoint{
+			{Protocol: "rest", Listen: ":8080"},
+			{Protocol: "rpc", Listen: ":8081"},
+		},
+	}
+	cfg := V2NetworkToAdapterConfig(net)
 
 	if cfg.Name != "pocket" {
 		t.Fatalf("Name: got %q, want %q", cfg.Name, "pocket")
@@ -245,22 +249,59 @@ func TestV1NetworkToAdapterConfig(t *testing.T) {
 	if cfg.Type != "cosmos" {
 		t.Fatalf("Type: got %q, want %q", cfg.Type, "cosmos")
 	}
+	if cfg.HeightCheck == nil {
+		t.Fatal("HeightCheck should not be nil")
+	}
+	if cfg.HeightCheck.Protocol != "rpc" {
+		t.Fatalf("HeightCheck.Protocol: got %q, want %q", cfg.HeightCheck.Protocol, "rpc")
+	}
+	if len(cfg.Endpoints) != 2 {
+		t.Fatalf("Endpoints: got %d, want 2", len(cfg.Endpoints))
+	}
 }
 
-func TestV1NodeToAdapterConfig(t *testing.T) {
+func TestV2NetworkToAdapterConfig_NoHeightCheck(t *testing.T) {
 	t.Parallel()
 
-	node := config.Node{
+	net := &config.MultiChainNetwork{
+		Name: "mynet",
+		Type: "evm",
+		Endpoints: []config.NetworkEndpoint{
+			{Protocol: "jsonrpc", Listen: ":8545"},
+		},
+	}
+	cfg := V2NetworkToAdapterConfig(net)
+
+	if cfg.Name != "mynet" {
+		t.Fatalf("Name: got %q, want %q", cfg.Name, "mynet")
+	}
+	if cfg.HeightCheck != nil {
+		t.Fatal("HeightCheck should be nil when not configured")
+	}
+	if len(cfg.Endpoints) != 1 {
+		t.Fatalf("Endpoints: got %d, want 1", len(cfg.Endpoints))
+	}
+}
+
+func TestV2NodeToAdapterConfig(t *testing.T) {
+	t.Parallel()
+
+	node := config.MultiChainNode{
 		Name:    "seed-one",
 		Network: "pocket",
-		API:     "http://seed-one:1317",
-		RPC:     "http://seed-one:26657",
-		GRPC:    "seed-one:9090",
+		Endpoints: map[string]string{
+			"rest": "http://seed-one:1317",
+			"rpc":  "http://seed-one:26657",
+			"grpc": "seed-one:9090",
+		},
 	}
-	cfg := v1NodeToAdapterConfig(node)
+	cfg := v2NodeToAdapterConfig(node)
 
 	if cfg.Name != "seed-one" {
 		t.Fatalf("Name: got %q", cfg.Name)
+	}
+	if cfg.Network != "pocket" {
+		t.Fatalf("Network: got %q", cfg.Network)
 	}
 	if cfg.Endpoint["rest"] != "http://seed-one:1317" {
 		t.Fatalf("rest: got %q", cfg.Endpoint["rest"])
@@ -273,15 +314,17 @@ func TestV1NodeToAdapterConfig(t *testing.T) {
 	}
 }
 
-func TestV1NodeToAdapterConfig_Partial(t *testing.T) {
+func TestV2NodeToAdapterConfig_Partial(t *testing.T) {
 	t.Parallel()
 
-	node := config.Node{
+	node := config.MultiChainNode{
 		Name:    "rpc-only",
 		Network: "pocket",
-		RPC:     "http://rpc-only:26657",
+		Endpoints: map[string]string{
+			"rpc": "http://rpc-only:26657",
+		},
 	}
-	cfg := v1NodeToAdapterConfig(node)
+	cfg := v2NodeToAdapterConfig(node)
 
 	if len(cfg.Endpoint) != 1 {
 		t.Fatalf("expected 1 endpoint, got %d", len(cfg.Endpoint))
@@ -291,13 +334,15 @@ func TestV1NodeToAdapterConfig_Partial(t *testing.T) {
 	}
 }
 
-func TestV1NodeURL(t *testing.T) {
+func TestV2NodeEndpoints(t *testing.T) {
 	t.Parallel()
 
-	node := config.Node{
-		API:  "http://api:1317",
-		RPC:  "http://rpc:26657",
-		GRPC: "grpc:9090",
+	node := config.MultiChainNode{
+		Endpoints: map[string]string{
+			"rest": "http://api:1317",
+			"rpc":  "http://rpc:26657",
+			"grpc": "grpc:9090",
+		},
 	}
 
 	tests := []struct {
@@ -313,8 +358,167 @@ func TestV1NodeURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := v1NodeURL(node, tt.protocol); got != tt.want {
-			t.Errorf("v1NodeURL(%q) = %q, want %q", tt.protocol, got, tt.want)
+		if got := node.Endpoints[tt.protocol]; got != tt.want {
+			t.Errorf("node.Endpoints[%q] = %q, want %q", tt.protocol, got, tt.want)
 		}
+	}
+}
+
+// testHealthCheckScheduler creates a minimal MultiChainScheduler for direct
+// scheduleGRPCHealthCheck / scheduleWebSocketHealthCheck tests.
+func testHealthCheckScheduler(t *testing.T) (*MultiChainScheduler, *storage.HealthStore) {
+	t.Helper()
+
+	healthStore := storage.NewHealthStore()
+	pool := newTestPool()
+
+	cfgYAML := `
+listen: ":3000"
+timeouts:
+  health_check: 3s
+  proxy: 60s
+grpc_keepalive:
+  time: 600s
+  timeout: 20s
+  permit_without_stream: true
+networks:
+  - name: testnet
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rpc
+        listen: ":18081"
+internals:
+  - name: test-node
+    network: testnet
+    endpoints:
+      rpc: "http://localhost:26657"
+`
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+
+	sched := &MultiChainScheduler{
+		pool:         pool,
+		healthStore:  healthStore,
+		configLoader: loader,
+		logger:       zap.NewNop(),
+		timeout:      3 * time.Second,
+	}
+
+	return sched, healthStore
+}
+
+// TestScheduleGRPCHealthCheck_Healthy verifies that a reachable gRPC server
+// results in the node being marked healthy.
+func TestScheduleGRPCHealthCheck_Healthy(t *testing.T) {
+	t.Parallel()
+
+	// Start a real gRPC server on a random port.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	grpcSrv := grpc.NewServer()
+	go func() { _ = grpcSrv.Serve(lis) }()
+	t.Cleanup(grpcSrv.Stop)
+
+	grpcAddr := lis.Addr().String()
+
+	sched, healthStore := testHealthCheckScheduler(t)
+
+	node := config.MultiChainNode{
+		Name:         "test-node",
+		Network:      "testnet",
+		Endpoints:    map[string]string{"grpc": grpcAddr},
+		GRPCInsecure: true,
+	}
+
+	sched.scheduleGRPCHealthCheck(node, grpcAddr, "grpc")
+	drainTestPool(sched.pool)
+
+	if !healthStore.IsHealthy("testnet", "test-node", "grpc") {
+		h := healthStore.GetHealth("testnet", "test-node", "grpc")
+		if h != nil {
+			t.Fatalf("expected test-node grpc to be healthy, got LastError=%q", h.LastError)
+		} else {
+			t.Fatal("expected test-node grpc to be healthy, but no health entry exists")
+		}
+	}
+}
+
+// TestScheduleGRPCHealthCheck_Unhealthy verifies that an unreachable gRPC
+// address results in the node being marked unhealthy.
+func TestScheduleGRPCHealthCheck_Unhealthy(t *testing.T) {
+	t.Parallel()
+
+	// Bind and immediately close to get a port that nothing listens on.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := lis.Addr().String()
+	_ = lis.Close()
+
+	sched, healthStore := testHealthCheckScheduler(t)
+	// Short timeout so the test doesn't hang on connection attempts.
+	sched.timeout = 500 * time.Millisecond
+
+	node := config.MultiChainNode{
+		Name:         "test-node",
+		Network:      "testnet",
+		Endpoints:    map[string]string{"grpc": closedAddr},
+		GRPCInsecure: true,
+	}
+
+	sched.scheduleGRPCHealthCheck(node, closedAddr, "grpc")
+	drainTestPool(sched.pool)
+
+	if healthStore.IsHealthy("testnet", "test-node", "grpc") {
+		t.Fatal("expected test-node grpc to be unhealthy for closed port")
+	}
+
+	h := healthStore.GetHealth("testnet", "test-node", "grpc")
+	if h == nil {
+		t.Fatal("expected health entry to exist")
+	}
+	if h.LastError == "" {
+		t.Fatal("expected LastError to be set for unreachable endpoint")
+	}
+}
+
+// TestScheduleWebSocketHealthCheck_Unhealthy verifies that a plain HTTP server
+// that does not support WebSocket upgrades results in the node being marked unhealthy.
+func TestScheduleWebSocketHealthCheck_Unhealthy(t *testing.T) {
+	t.Parallel()
+
+	// Plain HTTP server — no WebSocket support.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not a websocket endpoint"))
+	}))
+	defer srv.Close()
+
+	sched, healthStore := testHealthCheckScheduler(t)
+
+	node := config.MultiChainNode{
+		Name:      "test-node",
+		Network:   "testnet",
+		Endpoints: map[string]string{"rpc": srv.URL},
+	}
+
+	sched.scheduleWebSocketHealthCheck(node, srv.URL, "websocket")
+	drainTestPool(sched.pool)
+
+	if healthStore.IsHealthy("testnet", "test-node", "websocket") {
+		t.Fatal("expected test-node websocket to be unhealthy for non-WS endpoint")
+	}
+
+	h := healthStore.GetHealth("testnet", "test-node", "websocket")
+	if h == nil {
+		t.Fatal("expected health entry to exist")
+	}
+	if h.LastError == "" {
+		t.Fatal("expected LastError to be set")
 	}
 }

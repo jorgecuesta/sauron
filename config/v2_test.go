@@ -658,6 +658,317 @@ func TestMultiChainNetwork_HeightCheckInterval(t *testing.T) {
 	}
 }
 
+func TestMultiChainNetwork_HeightCheckProtocol(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		network MultiChainNetwork
+		want    string
+	}{
+		{
+			name:    "nil HeightCheck returns empty string",
+			network: MultiChainNetwork{},
+			want:    "",
+		},
+		{
+			name: "HeightCheck with rpc protocol",
+			network: MultiChainNetwork{
+				HeightCheck: &HeightCheckConfig{Protocol: "rpc"},
+			},
+			want: "rpc",
+		},
+		{
+			name: "HeightCheck with empty protocol",
+			network: MultiChainNetwork{
+				HeightCheck: &HeightCheckConfig{Protocol: ""},
+			},
+			want: "",
+		},
+		{
+			name: "HeightCheck with jsonrpc protocol",
+			network: MultiChainNetwork{
+				HeightCheck: &HeightCheckConfig{Protocol: "jsonrpc"},
+			},
+			want: "jsonrpc",
+		},
+		{
+			name: "HeightCheck with rest protocol",
+			network: MultiChainNetwork{
+				HeightCheck: &HeightCheckConfig{Protocol: "rest"},
+			},
+			want: "rest",
+		},
+		{
+			name: "HeightCheck with grpc protocol",
+			network: MultiChainNetwork{
+				HeightCheck: &HeightCheckConfig{Protocol: "grpc"},
+			},
+			want: "grpc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.network.HeightCheckProtocol()
+			if got != tt.want {
+				t.Fatalf("HeightCheckProtocol() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMultiChainConfig_GetEnabledTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cfg       MultiChainConfig
+		wantTypes []string // nil means expect nil/empty
+	}{
+		{
+			name:      "no networks returns nil",
+			cfg:       MultiChainConfig{},
+			wantTypes: nil,
+		},
+		{
+			name: "network with no endpoints returns nil",
+			cfg: MultiChainConfig{
+				Networks: []MultiChainNetwork{
+					{Name: "pocket", Type: "cosmos"},
+				},
+			},
+			wantTypes: nil,
+		},
+		{
+			name: "single network with rest rpc grpc",
+			cfg: MultiChainConfig{
+				Networks: []MultiChainNetwork{
+					{
+						Name: "pocket",
+						Type: "cosmos",
+						Endpoints: []NetworkEndpoint{
+							{Protocol: "rest", Listen: ":8080"},
+							{Protocol: "rpc", Listen: ":8081"},
+							{Protocol: "grpc", Listen: ":8082"},
+						},
+					},
+				},
+			},
+			wantTypes: []string{"rest", "rpc", "grpc"},
+		},
+		{
+			name: "two networks with overlapping protocols are deduplicated",
+			cfg: MultiChainConfig{
+				Networks: []MultiChainNetwork{
+					{
+						Name: "pocket",
+						Type: "cosmos",
+						Endpoints: []NetworkEndpoint{
+							{Protocol: "rpc", Listen: ":8081"},
+							{Protocol: "rest", Listen: ":8080"},
+						},
+					},
+					{
+						Name: "ethereum",
+						Type: "evm",
+						Endpoints: []NetworkEndpoint{
+							{Protocol: "jsonrpc", Listen: ":9080"},
+							{Protocol: "rpc", Listen: ":9081"}, // duplicate
+						},
+					},
+				},
+			},
+			wantTypes: []string{"rpc", "rest", "jsonrpc"}, // rpc deduplicated
+		},
+		{
+			name: "single network single endpoint",
+			cfg: MultiChainConfig{
+				Networks: []MultiChainNetwork{
+					{
+						Name: "pocket",
+						Type: "cosmos",
+						Endpoints: []NetworkEndpoint{
+							{Protocol: "rpc", Listen: ":8081"},
+						},
+					},
+				},
+			},
+			wantTypes: []string{"rpc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.cfg.GetEnabledTypes()
+			if tt.wantTypes == nil {
+				if len(got) != 0 {
+					t.Fatalf("GetEnabledTypes() = %v, want nil/empty", got)
+				}
+				return
+			}
+			if len(got) != len(tt.wantTypes) {
+				t.Fatalf("GetEnabledTypes() len = %d, want %d; got %v, want %v", len(got), len(tt.wantTypes), got, tt.wantTypes)
+			}
+			// Build a set to check membership (order may vary for multi-network case)
+			gotSet := make(map[string]bool, len(got))
+			for _, p := range got {
+				gotSet[p] = true
+			}
+			wantSet := make(map[string]bool, len(tt.wantTypes))
+			for _, p := range tt.wantTypes {
+				wantSet[p] = true
+			}
+			for p := range wantSet {
+				if !gotSet[p] {
+					t.Errorf("GetEnabledTypes() missing %q; got %v", p, got)
+				}
+			}
+			for p := range gotSet {
+				if !wantSet[p] {
+					t.Errorf("GetEnabledTypes() unexpected %q; got %v", p, got)
+				}
+			}
+		})
+	}
+}
+
+func TestMultiChainConfig_GetUserPermissions(t *testing.T) {
+	t.Parallel()
+
+	// Base config with two networks: pocket (rest, rpc) and ethereum (jsonrpc).
+	baseCfg := func() MultiChainConfig {
+		return MultiChainConfig{
+			Networks: []MultiChainNetwork{
+				{
+					Name: "pocket",
+					Type: "cosmos",
+					Endpoints: []NetworkEndpoint{
+						{Protocol: "rest", Listen: ":8080"},
+						{Protocol: "rpc", Listen: ":8081"},
+					},
+				},
+				{
+					Name: "ethereum",
+					Type: "evm",
+					Endpoints: []NetworkEndpoint{
+						{Protocol: "jsonrpc", Listen: ":9080"},
+					},
+				},
+			},
+			Users: []MultiChainUser{
+				{
+					Name:        "admin",
+					Token:       "admin-token",
+					Permissions: MultiChainPermissions{All: true},
+				},
+				{
+					Name:  "indexer",
+					Token: "indexer-token",
+					Permissions: MultiChainPermissions{
+						Networks: map[string]map[string]bool{
+							"pocket":   {"rest": true, "rpc": false},
+							"ethereum": {"jsonrpc": true},
+						},
+					},
+				},
+				{
+					Name:  "rpc-only",
+					Token: "rpc-token",
+					Permissions: MultiChainPermissions{
+						Networks: map[string]map[string]bool{
+							"pocket": {"rpc": true},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		token     string
+		wantTypes []string // nil means nil/empty
+		wantAll   bool     // if true, expect all enabled types (rest, rpc, jsonrpc)
+	}{
+		{
+			name:    "user not found returns all enabled types",
+			token:   "nonexistent-token",
+			wantAll: true,
+		},
+		{
+			name:    "empty token returns all enabled types",
+			token:   "",
+			wantAll: true,
+		},
+		{
+			name:    "user with All=true returns all enabled types",
+			token:   "admin-token",
+			wantAll: true,
+		},
+		{
+			name:      "user with specific permissions returns only allowed protocols",
+			token:     "indexer-token",
+			wantTypes: []string{"rest", "jsonrpc"}, // rpc=false excluded
+		},
+		{
+			name:      "user with single network permissions",
+			token:     "rpc-token",
+			wantTypes: []string{"rpc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := baseCfg()
+			got := cfg.GetUserPermissions(tt.token)
+
+			if tt.wantAll {
+				// Should equal GetEnabledTypes(): rest, rpc, jsonrpc.
+				all := cfg.GetEnabledTypes()
+				if len(got) != len(all) {
+					t.Fatalf("GetUserPermissions(%q) len = %d, want %d (all enabled); got %v, want %v",
+						tt.token, len(got), len(all), got, all)
+				}
+				gotSet := make(map[string]bool, len(got))
+				for _, p := range got {
+					gotSet[p] = true
+				}
+				for _, p := range all {
+					if !gotSet[p] {
+						t.Errorf("GetUserPermissions(%q) missing %q; got %v", tt.token, p, got)
+					}
+				}
+				return
+			}
+
+			if tt.wantTypes == nil {
+				if len(got) != 0 {
+					t.Fatalf("GetUserPermissions(%q) = %v, want nil/empty", tt.token, got)
+				}
+				return
+			}
+
+			if len(got) != len(tt.wantTypes) {
+				t.Fatalf("GetUserPermissions(%q) len = %d, want %d; got %v, want %v",
+					tt.token, len(got), len(tt.wantTypes), got, tt.wantTypes)
+			}
+			gotSet := make(map[string]bool, len(got))
+			for _, p := range got {
+				gotSet[p] = true
+			}
+			for _, p := range tt.wantTypes {
+				if !gotSet[p] {
+					t.Errorf("GetUserPermissions(%q) missing %q; got %v", tt.token, p, got)
+				}
+			}
+		})
+	}
+}
+
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && searchStr(s, substr)
 }

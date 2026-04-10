@@ -59,7 +59,7 @@ func init() {
 // The Eye's gaze through the gRPC realm
 type GRPCProxy struct {
 	selector      *selector.Selector
-	configLoader  *config.Loader
+	configLoader  *config.MultiChainLoader
 	endpointStore *storage.ExternalEndpointStore
 	logger        *zap.Logger
 	network       string // The network this proxy serves
@@ -73,7 +73,7 @@ type GRPCProxy struct {
 // NewGRPCProxy creates a new gRPC proxy for a specific network
 func NewGRPCProxy(
 	selector *selector.Selector,
-	configLoader *config.Loader,
+	configLoader *config.MultiChainLoader,
 	endpointStore *storage.ExternalEndpointStore,
 	logger *zap.Logger,
 	network string,
@@ -93,11 +93,11 @@ func (p *GRPCProxy) GetServer() *grpc.Server {
 	// Get network config for message size limits
 	cfg := p.configLoader.Get()
 	var maxRecvSize, maxSendSize int
-	for _, network := range cfg.Networks {
-		if network.Name == p.network {
-			maxRecvSize = network.GRPCMaxRecvMsgSize
-			maxSendSize = network.GRPCMaxSendMsgSize
-			break
+	net := cfg.FindNetwork(p.network)
+	if net != nil {
+		if ep := net.FindEndpoint("grpc"); ep != nil {
+			maxRecvSize = ep.GRPCMaxRecvMsgSize
+			maxSendSize = ep.GRPCMaxSendMsgSize
 		}
 	}
 
@@ -156,11 +156,11 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 	// Get network config for message size limits
 	cfg := p.configLoader.Get()
 	var maxRecvSize, maxSendSize int
-	for _, network := range cfg.Networks {
-		if network.Name == p.network {
-			maxRecvSize = network.GRPCMaxRecvMsgSize
-			maxSendSize = network.GRPCMaxSendMsgSize
-			break
+	net2 := cfg.FindNetwork(p.network)
+	if net2 != nil {
+		if ep := net2.FindEndpoint("grpc"); ep != nil {
+			maxRecvSize = ep.GRPCMaxRecvMsgSize
+			maxSendSize = ep.GRPCMaxSendMsgSize
 		}
 	}
 
@@ -414,12 +414,6 @@ func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
 	for _, node := range cfg.Internals {
 		if node.Name == nodeName {
 			return node.GRPCInsecure
-		}
-	}
-	// If node not found, fall back to network-level setting
-	for _, network := range cfg.Networks {
-		if network.Name == p.network {
-			return network.GRPCInsecure
 		}
 	}
 	return false

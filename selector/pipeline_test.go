@@ -59,15 +59,15 @@ func TestPipeline_AllFiltersActive(t *testing.T) {
 	//   node-2: healthy=NO,  archival=yes, drift=0  → fails health
 	//   node-3: healthy=yes, archival=NO,  drift=0  → fails archival
 	//   node-4: healthy=yes, archival=yes, drift=20 → fails sync
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-3", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-4", "api", 80, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-3", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-4", "rpc", 80, 10*time.Millisecond, "internal")
 
-	healthStore.SetHealthy("pocket", "node-1", "api")
-	healthStore.SetUnhealthy("pocket", "node-2", "api", "connection refused")
-	healthStore.SetHealthy("pocket", "node-3", "api")
-	healthStore.SetHealthy("pocket", "node-4", "api")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
+	healthStore.SetUnhealthy("pocket", "node-2", "rest", "connection refused")
+	healthStore.SetHealthy("pocket", "node-3", "rest")
+	healthStore.SetHealthy("pocket", "node-4", "rest")
 
 	archivalStore.SetArchival("pocket", "node-1")
 	archivalStore.SetArchival("pocket", "node-2")
@@ -100,8 +100,8 @@ func TestPipeline_FiltersWiredButUnconfigured(t *testing.T) {
 	// Since no health data exists, all nodes will be excluded by health filter.
 	// This is the expected conservative behavior.
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 10*time.Millisecond, "internal")
 
 	m, _, _ := sel.GetBestNode("pocket", "api")
 
@@ -119,11 +119,11 @@ func TestPipeline_HealthyButNoArchivalOrSyncConfig(t *testing.T) {
 	sel, heightStore, healthStore, _, _, _, _ := setupFullPipeline(t)
 
 	// Only health data — no archival/sync config.
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 99, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 99, 10*time.Millisecond, "internal")
 
-	healthStore.SetHealthy("pocket", "node-1", "api")
-	healthStore.SetHealthy("pocket", "node-2", "api")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
+	healthStore.SetHealthy("pocket", "node-2", "rest")
 
 	m, nodeName, decision := sel.GetBestNode("pocket", "api")
 
@@ -154,8 +154,8 @@ func TestPipeline_FilterOrder(t *testing.T) {
 
 	// node-1: unhealthy but passes archival+sync.
 	// If filter order is wrong, it might reach archival/sync.
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	healthStore.SetUnhealthy("pocket", "node-1", "api", "down")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	healthStore.SetUnhealthy("pocket", "node-1", "rest", "down")
 	archivalStore.SetArchival("pocket", "node-1")
 
 	m, _, _ := sel.GetBestNode("pocket", "api")
@@ -174,8 +174,8 @@ func TestPipeline_HealthyNodeFailsArchival(t *testing.T) {
 
 	archFilter.RequireArchival("pocket")
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	healthStore.SetHealthy("pocket", "node-1", "api")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
 	archivalStore.SetNotArchival("pocket", "node-1")
 
 	m, _, _ := sel.GetBestNode("pocket", "api")
@@ -196,8 +196,8 @@ func TestPipeline_ArchivalPassesSyncFails(t *testing.T) {
 	syncFilter.SetMaxDrift("pocket", 5)
 	oracleStore.Update("pocket", 100, "oracle")
 
-	heightStore.Update("pocket", "node-1", "api", 80, 10*time.Millisecond, "internal") // drift=20
-	healthStore.SetHealthy("pocket", "node-1", "api")
+	heightStore.Update("pocket", "node-1", "rpc", 80, 10*time.Millisecond, "internal") // drift=20
+	healthStore.SetHealthy("pocket", "node-1", "rest")
 	archivalStore.SetArchival("pocket", "node-1")
 
 	m, _, _ := sel.GetBestNode("pocket", "api")
@@ -222,13 +222,13 @@ func TestPipeline_MultipleNetworksIndependent(t *testing.T) {
 	// "ethereum" has NO archival/sync requirements — just health.
 
 	// pocket node: passes health, fails archival.
-	heightStore.Update("pocket", "node-p", "api", 100, 10*time.Millisecond, "internal")
-	healthStore.SetHealthy("pocket", "node-p", "api")
+	heightStore.Update("pocket", "node-p", "rpc", 100, 10*time.Millisecond, "internal")
+	healthStore.SetHealthy("pocket", "node-p", "rest")
 	archivalStore.SetNotArchival("pocket", "node-p")
 
 	// ethereum node: passes health, no archival/sync needed.
-	heightStore.Update("ethereum", "node-e", "api", 20000000, 10*time.Millisecond, "internal")
-	healthStore.SetHealthy("ethereum", "node-e", "api")
+	heightStore.Update("ethereum", "node-e", "rpc", 20000000, 10*time.Millisecond, "internal")
+	healthStore.SetHealthy("ethereum", "node-e", "rest")
 
 	// pocket should fail (archival required, node not archival).
 	m, _, _ := sel.GetBestNode("pocket", "api")
@@ -257,10 +257,10 @@ func TestPipeline_NodeRecoveryThroughAllFilters(t *testing.T) {
 	syncFilter.SetMaxDrift("pocket", 5)
 	oracleStore.Update("pocket", 100, "oracle")
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
 
 	// Start: fails all three.
-	healthStore.SetUnhealthy("pocket", "node-1", "api", "down")
+	healthStore.SetUnhealthy("pocket", "node-1", "rest", "down")
 	archivalStore.SetNotArchival("pocket", "node-1")
 
 	m, _, _ := sel.GetBestNode("pocket", "api")
@@ -269,7 +269,7 @@ func TestPipeline_NodeRecoveryThroughAllFilters(t *testing.T) {
 	}
 
 	// Step 2: health recovers, still fails archival.
-	healthStore.SetHealthy("pocket", "node-1", "api")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
 	m, _, _ = sel.GetBestNode("pocket", "api")
 	if m != nil {
 		t.Fatal("step 2: expected nil (still fails archival)")
@@ -328,8 +328,8 @@ func TestPipeline_ZeroHeightAfterFiltering(t *testing.T) {
 	sel, heightStore, healthStore, _, _, _, _ := setupFullPipeline(t)
 
 	// Node with height 0 (checker hasn't run yet).
-	heightStore.Update("pocket", "node-1", "api", 0, 10*time.Millisecond, "internal")
-	healthStore.SetHealthy("pocket", "node-1", "api")
+	heightStore.Update("pocket", "node-1", "rpc", 0, 10*time.Millisecond, "internal")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
 
 	m, _, _ := sel.GetBestNode("pocket", "api")
 	if m != nil {
@@ -354,8 +354,8 @@ func TestPipeline_NoFilters_V1Pure(t *testing.T) {
 	// No HealthStore, no ArchivalFilter, no SyncFilter.
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 99, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 99, 10*time.Millisecond, "internal")
 
 	m, nodeName, _ := sel.GetBestNode("pocket", "api")
 	if m == nil {
@@ -381,8 +381,8 @@ func TestPipeline_OnlyArchival(t *testing.T) {
 	sel.SetArchivalFilter(archFilter)
 	// No HealthStore, no SyncFilter.
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 10*time.Millisecond, "internal")
 
 	archivalStore.SetArchival("pocket", "node-1")
 	archivalStore.SetNotArchival("pocket", "node-2")
@@ -413,8 +413,8 @@ func TestPipeline_OnlySync(t *testing.T) {
 
 	oracleStore.Update("pocket", 100, "oracle")
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal") // drift=0
-	heightStore.Update("pocket", "node-2", "api", 80, 10*time.Millisecond, "internal")  // drift=20
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal") // drift=0
+	heightStore.Update("pocket", "node-2", "rpc", 80, 10*time.Millisecond, "internal")  // drift=20
 
 	m, nodeName, _ := sel.GetBestNode("pocket", "api")
 	if m == nil {
@@ -442,13 +442,13 @@ func TestPipeline_HealthAndArchival(t *testing.T) {
 	sel.SetArchivalFilter(archFilter)
 	// No SyncFilter.
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-3", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-3", "rpc", 100, 10*time.Millisecond, "internal")
 
-	healthStore.SetHealthy("pocket", "node-1", "api")
-	healthStore.SetHealthy("pocket", "node-2", "api")
-	healthStore.SetUnhealthy("pocket", "node-3", "api", "down") // fails health
+	healthStore.SetHealthy("pocket", "node-1", "rest")
+	healthStore.SetHealthy("pocket", "node-2", "rest")
+	healthStore.SetUnhealthy("pocket", "node-3", "rest", "down") // fails health
 
 	archivalStore.SetArchival("pocket", "node-1")
 	archivalStore.SetNotArchival("pocket", "node-2") // fails archival
@@ -485,11 +485,11 @@ func TestPipeline_HealthAndSync(t *testing.T) {
 
 	oracleStore.Update("pocket", 100, "oracle")
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 80, 10*time.Millisecond, "internal") // drift=20
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 80, 10*time.Millisecond, "internal") // drift=20
 
-	healthStore.SetHealthy("pocket", "node-1", "api")
-	healthStore.SetHealthy("pocket", "node-2", "api")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
+	healthStore.SetHealthy("pocket", "node-2", "rest")
 
 	m, nodeName, _ := sel.GetBestNode("pocket", "api")
 	if m == nil {
@@ -521,9 +521,9 @@ func TestPipeline_ArchivalAndSync(t *testing.T) {
 
 	oracleStore.Update("pocket", 100, "oracle")
 
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 80, 10*time.Millisecond, "internal") // drift=20
-	heightStore.Update("pocket", "node-3", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 80, 10*time.Millisecond, "internal") // drift=20
+	heightStore.Update("pocket", "node-3", "rpc", 100, 10*time.Millisecond, "internal")
 
 	archivalStore.SetArchival("pocket", "node-1")
 	archivalStore.SetArchival("pocket", "node-2")

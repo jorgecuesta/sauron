@@ -30,10 +30,10 @@ import (
 // Server orchestrates all components of Sauron
 // The foundation of Barad-dûr
 type Server struct {
-	configLoader  *config.Loader
+	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
 	pool          pond.Pool
-	scheduler     *checker.Scheduler
+	scheduler     *checker.MultiChainScheduler
 	store         *storage.HeightStore
 	healthStore   *storage.HealthStore   // per-node per-protocol health
 	archivalStore *storage.ArchivalStore // archival node tracking
@@ -46,7 +46,7 @@ type Server struct {
 	oracleChecker *checker.OracleChecker // oracle height checker
 	statusServer  *http.Server
 	statusHandler *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
-	httpServers   []*http.Server     // All HTTP proxy servers (API + RPC)
+	httpServers   []*http.Server     // All HTTP proxy servers
 	grpcServers   []*grpc.Server     // All gRPC proxy servers
 	grpcProxies   []*proxy.GRPCProxy // All gRPC proxy instances (for Close)
 	errCh         chan error         // Fatal errors from background goroutines
@@ -62,8 +62,8 @@ func New(configPath string) (*Server, error) {
 
 	logger.Info("The Eye of Sauron awakens...", zap.String("config", configPath))
 
-	// Load configuration
-	configLoader, err := config.NewLoader(configPath, logger)
+	// Load V2 configuration
+	configLoader, err := config.NewMultiChainLoader(configPath, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -72,11 +72,13 @@ func New(configPath string) (*Server, error) {
 
 	// Initialize storage
 	store := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	archivalStore := storage.NewArchivalStore()
+	oracleStore := storage.NewOracleStore()
 	logger.Info("The Dark Lord's memory initialized")
 
 	// Initialize external endpoint store
 	endpointStore := storage.NewExternalEndpointStore(logger)
-	logger.Info("External endpoint tracking initialized")
 
 	// Initialize cache (optional)
 	var cacheURI string
@@ -85,50 +87,78 @@ func New(configPath string) (*Server, error) {
 	}
 	cache := storage.NewCache(cacheURI, logger)
 
-	// Initialize worker pool (The servants of Sauron)
+	// Initialize worker pool
 	ctx := context.Background()
 	pool := pond.NewPool(100, pond.WithContext(ctx))
 	logger.Info("Worker pool created", zap.Int("workers", 100))
 
-	// Initialize selector
-	sel := selector.NewSelector(store, endpointStore, configLoader, logger)
-	logger.Info("The Dark Lord's judgment ready")
-
-	// Initialize scheduler
-	sched := checker.NewScheduler(store, cache, endpointStore, configLoader, pool, logger)
-
-	// Initialize adapter registry with cosmos factory.
+	// Initialize adapter registry with all built-in adapters.
 	registry := adapter.NewRegistry()
-	if err := registry.Register(cosmos.New()); err != nil {
-		return nil, fmt.Errorf("failed to register cosmos adapter: %w", err)
-	}
-	if err := registry.Register(evm.New()); err != nil {
-		return nil, fmt.Errorf("failed to register evm adapter: %w", err)
-	}
-	if err := registry.Register(solana.New()); err != nil {
-		return nil, fmt.Errorf("failed to register solana adapter: %w", err)
-	}
-	if err := registry.Register(custom.New()); err != nil {
-		return nil, fmt.Errorf("failed to register custom adapter: %w", err)
+	for _, factory := range []adapter.ChainAdapter{cosmos.New(), evm.New(), solana.New(), custom.New()} {
+		if err := registry.Register(factory); err != nil {
+			return nil, fmt.Errorf("failed to register %s adapter: %w", factory.Type(), err)
+		}
 	}
 
-	// Initialize stores and check engine.
-	healthStore := storage.NewHealthStore()
-	archivalStore := storage.NewArchivalStore()
-	oracleStore := storage.NewOracleStore()
 	engine := adapter.NewEngine(checker.NewMultiChainHTTPClient())
 
-	// Initialize selector filters (dormant until configured per-network).
+	logger.Info("Adapter engine initialized",
+		zap.Strings("adapters", registry.Types()),
+	)
+
+	// Initialize selector with V2 config loader.
+	sel := selector.NewSelector(store, endpointStore, configLoader, logger)
+	sel.SetHealthStore(healthStore)
+
+	// Initialize selector filters.
 	archivalFilter := selector.NewArchivalFilter(archivalStore, logger)
 	syncFilter := selector.NewSyncFilter(oracleStore, logger)
 	sel.SetArchivalFilter(archivalFilter)
 	sel.SetSyncFilter(syncFilter)
 
-	// Initialize oracle checker (configs added per-network during setup).
+	// Initialize oracle checker.
 	oracleChecker := checker.NewOracleChecker(engine, oracleStore, logger)
 
-	logger.Info("Adapter engine initialized",
-		zap.Strings("adapters", registry.Types()),
+	// Configure filters and oracles from V2 network config.
+	for _, network := range cfg.Networks {
+		if network.Archival != nil {
+			archivalFilter.RequireArchival(network.Name)
+			logger.Info("Archival filter enabled",
+				zap.String("network", network.Name),
+				zap.Int64("min_height", network.Archival.MinHeight),
+			)
+		}
+
+		if network.Sync != nil {
+			syncFilter.SetMaxDrift(network.Name, network.Sync.MaxDrift)
+			logger.Info("Sync filter enabled",
+				zap.String("network", network.Name),
+				zap.Int64("max_drift", network.Sync.MaxDrift),
+			)
+
+			// Build oracle configs from sync oracles.
+			oracleCfg, err := buildOracleConfig(&network, registry)
+			if err != nil {
+				logger.Warn("Failed to build oracle config",
+					zap.String("network", network.Name),
+					zap.Error(err),
+				)
+			} else {
+				oracleChecker.AddConfig(oracleCfg)
+				logger.Info("Oracle checker configured",
+					zap.String("network", network.Name),
+					zap.Int("oracles", len(oracleCfg.Oracles)),
+				)
+			}
+		}
+	}
+
+	// Initialize scheduler with V2 config.
+	sched := checker.NewMultiChainScheduler(engine, registry, store, healthStore, cache, endpointStore, oracleChecker, configLoader, pool, logger)
+
+	logger.Info("The Dark Lord's judgment ready",
+		zap.Int("networks", len(cfg.Networks)),
+		zap.Int("internal_nodes", len(cfg.Internals)),
 	)
 
 	return &Server{
@@ -150,21 +180,79 @@ func New(configPath string) (*Server, error) {
 	}, nil
 }
 
+// buildOracleConfig creates an OracleConfig for a network's sync configuration.
+// For each oracle, it either uses the oracle's override config or falls back
+// to the network's height check config via the adapter factory.
+func buildOracleConfig(network *config.MultiChainNetwork, registry *adapter.Registry) (checker.OracleConfig, error) {
+	oracleCfg := checker.OracleConfig{
+		Network:  network.Name,
+		Interval: network.Sync.CheckInterval,
+	}
+
+	adpt, err := registry.Get(network.Type)
+	if err != nil {
+		return oracleCfg, fmt.Errorf("no adapter for type %q: %w", network.Type, err)
+	}
+
+	// Get the network's default height check config for oracles without overrides.
+	netAdapterCfg := checker.V2NetworkToAdapterConfig(network)
+	defaultCheck, err := adpt.HeightCheck(netAdapterCfg)
+	if err != nil {
+		return oracleCfg, fmt.Errorf("failed to get default height check: %w", err)
+	}
+
+	for _, oracle := range network.Sync.Oracles {
+		var checkCfg adapter.CheckConfig
+
+		if oracle.ResponsePath != "" {
+			// Oracle has custom config — build CheckConfig from overrides.
+			checkCfg = adapter.CheckConfig{
+				Method:         oracle.Method,
+				URLPath:        oracle.URLPath,
+				ResponsePath:   oracle.ResponsePath,
+				ResponseFormat: oracle.ResponseFormat,
+				Protocol:       "http",
+			}
+			if oracle.Headers != nil {
+				for k, v := range oracle.Headers {
+					if checkCfg.Headers == nil {
+						checkCfg.Headers = make(map[string][]string)
+					}
+					checkCfg.Headers.Set(k, v)
+				}
+			}
+			if oracle.Body != "" {
+				checkCfg.Body = []byte(oracle.Body)
+			}
+		} else {
+			// No override — reuse the network's height check config.
+			checkCfg = defaultCheck
+		}
+
+		oracleCfg.Oracles = append(oracleCfg.Oracles, checker.OracleEndpoint{
+			URL:   oracle.URL,
+			Check: checkCfg,
+		})
+	}
+
+	return oracleCfg, nil
+}
+
 // Start begins all Sauron services
 func (s *Server) Start() error {
 	cfg := s.configLoader.Get()
 
-	// Start scheduler (The Eye never sleeps)
+	// Start scheduler
 	if err := s.scheduler.Start(); err != nil {
 		return fmt.Errorf("failed to start scheduler: %w", err)
 	}
 
-	// Start status server (The Palantír)
+	// Start status server
 	if err := s.startStatusServer(cfg); err != nil {
 		return err
 	}
 
-	// Start proxy servers (The gates) - one set per network
+	// Start proxy servers — one set per network endpoint
 	if err := s.startNetworkProxies(cfg); err != nil {
 		return err
 	}
@@ -178,10 +266,9 @@ func (s *Server) Start() error {
 }
 
 // startStatusServer starts the status API server
-func (s *Server) startStatusServer(cfg *config.Config) error {
+func (s *Server) startStatusServer(cfg *config.MultiChainConfig) error {
 	mux := http.NewServeMux()
 
-	// Setup status routes
 	handler := status.NewHandler(s.selector, s.configLoader, s.logger)
 	handler.SetupRoutes(mux)
 	s.statusHandler = handler
@@ -202,85 +289,78 @@ func (s *Server) startStatusServer(cfg *config.Config) error {
 	return nil
 }
 
-// startNetworkProxies starts proxy servers for each configured network
-func (s *Server) startNetworkProxies(cfg *config.Config) error {
+// startNetworkProxies starts proxy servers for each configured network endpoint.
+// V2: iterates network.Endpoints instead of checking global API/RPC/GRPC flags.
+func (s *Server) startNetworkProxies(cfg *config.MultiChainConfig) error {
 	for _, network := range cfg.Networks {
-		// Start API proxy for this network
-		if cfg.API && network.APIListen != "" {
-			proxyHandler := proxy.NewHTTPProxy(s.selector, s.configLoader, s.endpointStore, s.logger, "api", network.Name)
-			server := &http.Server{
-				Addr:    network.APIListen,
-				Handler: proxyHandler,
+		for _, endpoint := range network.Endpoints {
+			switch endpoint.Protocol {
+			case "grpc":
+				s.startGRPCProxy(network.Name, endpoint.Listen)
+			default:
+				// All non-gRPC protocols (rest, rpc, jsonrpc, http) use HTTP proxy.
+				s.startHTTPProxy(network.Name, endpoint.Protocol, endpoint.Listen)
 			}
-			s.httpServers = append(s.httpServers, server)
-
-			go func(netName, addr string) {
-				s.logger.Info("API proxy starting",
-					zap.String("network", netName),
-					zap.String("addr", addr),
-				)
-				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					s.logger.Error("API proxy failed", zap.String("network", netName), zap.Error(err))
-					s.errCh <- err
-				}
-			}(network.Name, network.APIListen)
-		}
-
-		// Start RPC proxy for this network
-		if cfg.RPC && network.RPCListen != "" {
-			proxyHandler := proxy.NewHTTPProxy(s.selector, s.configLoader, s.endpointStore, s.logger, "rpc", network.Name)
-			server := &http.Server{
-				Addr:    network.RPCListen,
-				Handler: proxyHandler,
-			}
-			s.httpServers = append(s.httpServers, server)
-
-			go func(netName, addr string) {
-				s.logger.Info("RPC proxy starting",
-					zap.String("network", netName),
-					zap.String("addr", addr),
-				)
-				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					s.logger.Error("RPC proxy failed", zap.String("network", netName), zap.Error(err))
-					s.errCh <- err
-				}
-			}(network.Name, network.RPCListen)
-		}
-
-		// Start gRPC proxy for this network
-		if cfg.GRPC && network.GRPCListen != "" {
-			grpcProxy := proxy.NewGRPCProxy(s.selector, s.configLoader, s.endpointStore, s.logger, network.Name)
-			grpcServer := grpcProxy.GetServer()
-			s.grpcServers = append(s.grpcServers, grpcServer)
-			s.grpcProxies = append(s.grpcProxies, grpcProxy)
-
-			go func(netName, addr string) {
-				s.logger.Info("gRPC proxy starting",
-					zap.String("network", netName),
-					zap.String("addr", addr),
-				)
-
-				// Create TCP listener
-				lis, err := net.Listen("tcp", addr)
-				if err != nil {
-					s.logger.Error("gRPC proxy failed to listen",
-						zap.String("network", netName),
-						zap.Error(err))
-					s.errCh <- err
-					return
-				}
-
-				if err := grpcServer.Serve(lis); err != nil {
-					s.logger.Error("gRPC proxy failed",
-						zap.String("network", netName),
-						zap.Error(err))
-					s.errCh <- err
-				}
-			}(network.Name, network.GRPCListen)
 		}
 	}
-
 	return nil
+}
+
+// startHTTPProxy starts an HTTP proxy for a network endpoint.
+func (s *Server) startHTTPProxy(networkName, protocol, listenAddr string) {
+	proxyHandler := proxy.NewHTTPProxy(s.selector, s.configLoader, s.endpointStore, s.logger, protocol, networkName)
+	server := &http.Server{
+		Addr:    listenAddr,
+		Handler: proxyHandler,
+	}
+	s.httpServers = append(s.httpServers, server)
+
+	go func() {
+		s.logger.Info("HTTP proxy starting",
+			zap.String("network", networkName),
+			zap.String("protocol", protocol),
+			zap.String("addr", listenAddr),
+		)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("HTTP proxy failed",
+				zap.String("network", networkName),
+				zap.String("protocol", protocol),
+				zap.Error(err),
+			)
+			s.errCh <- err
+		}
+	}()
+}
+
+// startGRPCProxy starts a gRPC proxy for a network endpoint.
+func (s *Server) startGRPCProxy(networkName, listenAddr string) {
+	grpcProxy := proxy.NewGRPCProxy(s.selector, s.configLoader, s.endpointStore, s.logger, networkName)
+	grpcServer := grpcProxy.GetServer()
+	s.grpcServers = append(s.grpcServers, grpcServer)
+	s.grpcProxies = append(s.grpcProxies, grpcProxy)
+
+	go func() {
+		s.logger.Info("gRPC proxy starting",
+			zap.String("network", networkName),
+			zap.String("addr", listenAddr),
+		)
+
+		lis, err := net.Listen("tcp", listenAddr)
+		if err != nil {
+			s.logger.Error("gRPC proxy failed to listen",
+				zap.String("network", networkName),
+				zap.Error(err))
+			s.errCh <- err
+			return
+		}
+
+		if err := grpcServer.Serve(lis); err != nil {
+			s.logger.Error("gRPC proxy failed",
+				zap.String("network", networkName),
+				zap.Error(err))
+			s.errCh <- err
+		}
+	}()
 }
 
 // WaitForShutdown waits for a shutdown signal or a fatal error from a background

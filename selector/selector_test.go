@@ -1,80 +1,21 @@
 package selector
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	"sauron/config"
+	"sauron/internal/testutil"
 	"sauron/storage"
 
 	"go.uber.org/zap"
 )
 
-// createTestConfig creates a temporary config file and returns a Loader
-func createTestConfig(t *testing.T, threshold int64) *config.Loader {
+// createTestConfig creates a temporary config file and returns a MultiChainLoader (V2).
+func createTestConfig(t *testing.T, threshold int64) *config.MultiChainLoader {
 	t.Helper()
 
-	// Create temp config file
-	content := `
-api: true
-rpc: true
-grpc: true
-listen: ":3000"
-external_failover_threshold: %d
-
-networks:
-  - name: "pocket"
-    api_listen: ":8080"
-    rpc_listen: ":8081"
-    grpc_listen: ":8082"
-
-internals:
-  - name: node-1
-    api: "https://node1.example.com"
-    rpc: "https://node1.example.com:26657"
-    grpc: "node1.example.com:9090"
-    network: "pocket"
-  - name: node-2
-    api: "https://node2.example.com"
-    rpc: "https://node2.example.com:26657"
-    grpc: "node2.example.com:9090"
-    network: "pocket"
-`
-	tmpFile, err := os.CreateTemp("", "sauron-test-*.yaml")
-	if err != nil {
-		t.Fatalf("Failed to create temp config file: %v", err)
-	}
-
-	configContent := replaceThreshold(content, threshold)
-
-	if _, err := tmpFile.WriteString(configContent); err != nil {
-		t.Fatalf("Failed to write temp config: %v", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		t.Fatalf("Failed to close temp config file: %v", err)
-	}
-
-	// Cleanup on test end
-	t.Cleanup(func() {
-		_ = os.Remove(tmpFile.Name())
-	})
-
-	logger := zap.NewNop()
-	loader, err := config.NewLoader(tmpFile.Name(), logger)
-	if err != nil {
-		t.Fatalf("Failed to create config loader: %v", err)
-	}
-
-	return loader
-}
-
-func replaceThreshold(content string, threshold int64) string {
-	return content[:0] + `
-api: true
-rpc: true
-grpc: true
-listen: ":3000"
+	configContent := `listen: ":3000"
 external_failover_threshold: ` + itoa(threshold) + `
 
 timeouts:
@@ -82,23 +23,37 @@ timeouts:
   proxy: 60s
 
 networks:
-  - name: "pocket"
-    api_listen: ":8080"
-    rpc_listen: ":8081"
-    grpc_listen: ":8082"
+  - name: pocket
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+      - protocol: rpc
+        listen: ":8081"
+      - protocol: grpc
+        listen: ":8082"
 
 internals:
   - name: node-1
-    api: "https://node1.example.com"
-    rpc: "https://node1.example.com:26657"
-    grpc: "node1.example.com:9090"
-    network: "pocket"
+    network: pocket
+    endpoints:
+      rest: "https://node1.example.com"
+      rpc: "https://node1.example.com:26657"
+      grpc: "node1.example.com:9090"
+    grpc_insecure: true
   - name: node-2
-    api: "https://node2.example.com"
-    rpc: "https://node2.example.com:26657"
-    grpc: "node2.example.com:9090"
-    network: "pocket"
+    network: pocket
+    endpoints:
+      rest: "https://node2.example.com"
+      rpc: "https://node2.example.com:26657"
+      grpc: "node2.example.com:9090"
+    grpc_insecure: true
 `
+
+	return testutil.NewMultiChainLoader(t, configContent)
 }
 
 func itoa(n int64) string {
@@ -122,8 +77,8 @@ func TestSelectorInternalsOnlyWhenWithinThreshold(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Setup internal nodes at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 98, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 98, 30*time.Millisecond, "internal")
 
 	// Setup external endpoint at height 102 (within threshold of 2)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -162,8 +117,8 @@ func TestSelectorExternalsAddedWhenAheadByThreshold(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Setup internal nodes at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 98, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 98, 30*time.Millisecond, "internal")
 
 	// Setup external endpoint at height 103 (more than threshold of 2 ahead)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -202,8 +157,8 @@ func TestSelectorExternalsAddedWhenNoHealthyInternals(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Setup internal nodes at height 0 (unhealthy)
-	heightStore.Update("pocket", "node-1", "api", 0, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 0, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 0, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 0, 30*time.Millisecond, "internal")
 
 	// Setup external endpoint at height 100
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -237,8 +192,8 @@ func TestSelectorLatencyTiebreakerSameHeight(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Setup internal nodes at same height with different latencies
-	heightStore.Update("pocket", "node-1", "api", 100, 100*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 20*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 100*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 20*time.Millisecond, "internal")
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
@@ -266,9 +221,9 @@ func TestSelectorHeightWinner(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// node-1 has higher height but higher latency
-	heightStore.Update("pocket", "node-1", "api", 105, 100*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 105, 100*time.Millisecond, "internal")
 	// node-2 has lower height but lower latency
-	heightStore.Update("pocket", "node-2", "api", 100, 20*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 20*time.Millisecond, "internal")
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
@@ -301,7 +256,7 @@ func TestSelectorDefaultThreshold(t *testing.T) {
 	configLoader := createTestConfig(t, 0) // 0 means use default
 
 	// Setup internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at 102 - should NOT trigger failover (102 > 100 + 2 = false)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -329,7 +284,7 @@ func TestSelectorCustomThreshold(t *testing.T) {
 	configLoader := createTestConfig(t, 5) // Custom threshold of 5
 
 	// Setup internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at 103 - would trigger with default threshold but NOT with 5
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -371,7 +326,7 @@ func TestSelectorMultipleExternals(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// Multiple externals ahead by threshold
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -435,7 +390,7 @@ func TestSelectorOnlyAvailable(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Only one internal node
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	selector := NewSelector(heightStore, endpointStore, configLoader, logger)
 
@@ -459,7 +414,7 @@ func TestGetHighestHeightsIncludesExternals(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at height 150
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -482,7 +437,7 @@ func TestSelectorExternalNotValidated(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External advertised but NOT validated (at height 200)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -511,12 +466,12 @@ func TestSelectorInternalWinsOverExternalSameHeight(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 105 with LOW latency
-	heightStore.Update("pocket", "node-1", "api", 105, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 105, 10*time.Millisecond, "internal")
 
 	// External at height 105 (triggers threshold: 105 > 100 would if internal was 100)
 	// But we need to trigger threshold first, so let's set internal lower initially
 	// Actually, let's set internal at 100, external at 105
-	heightStore.Update("pocket", "node-1", "api", 100, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
 
 	// External at 105 with higher latency (triggers: 105 > 100 + 2)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -538,7 +493,7 @@ func TestSelectorInternalWinsOverExternalSameHeight(t *testing.T) {
 
 	// Now test with internal ALSO at 105 - externals should NOT be added anymore
 	// because 105 > 105 + 2 = false (internal caught up, no need to overload externals)
-	heightStore.Update("pocket", "node-1", "api", 105, 10*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 105, 10*time.Millisecond, "internal")
 
 	metrics2, nodeName2, decision2 := selector.GetBestNode("pocket", "api")
 
@@ -568,7 +523,7 @@ func TestSelectorNilEndpointStore(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Setup internals
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// Create selector with nil endpointStore
 	selector := NewSelector(heightStore, nil, configLoader, logger)
@@ -596,7 +551,7 @@ func TestSelectorAllNodesZeroHeight(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 0
-	heightStore.Update("pocket", "node-1", "api", 0, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 0, 50*time.Millisecond, "internal")
 
 	// External also at height 0 (would be added since internal is 0)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -628,7 +583,7 @@ func TestSelectorExternalNotWorking(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at height 200 but will be marked as not working
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -662,7 +617,7 @@ func TestSelectorExternalLowerThanInternalNotAdded(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Internal at height 100
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// External at height 95 (lower than internal, should not trigger failover)
 	endpointStore.StoreAdvertised("external-1", "https://ring1.example.com", "pocket", "api", "https://ext1.example.com")
@@ -729,12 +684,12 @@ func TestSelector_HealthFilter_ExcludesUnhealthy(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// Both nodes at height 100.
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 30*time.Millisecond, "internal")
 
 	// node-1 healthy, node-2 unhealthy for api protocol.
-	healthStore.SetHealthy("pocket", "node-1", "api")
-	healthStore.SetUnhealthy("pocket", "node-2", "api", "connection refused")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
+	healthStore.SetUnhealthy("pocket", "node-2", "rest", "connection refused")
 
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
@@ -758,11 +713,11 @@ func TestSelector_HealthFilter_AllUnhealthy(t *testing.T) {
 	healthStore := storage.NewHealthStore()
 	configLoader := createTestConfig(t, 2)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 100, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 100, 30*time.Millisecond, "internal")
 
-	healthStore.SetUnhealthy("pocket", "node-1", "api", "down")
-	healthStore.SetUnhealthy("pocket", "node-2", "api", "down")
+	healthStore.SetUnhealthy("pocket", "node-1", "rest", "down")
+	healthStore.SetUnhealthy("pocket", "node-2", "rest", "down")
 
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
@@ -779,7 +734,7 @@ func TestSelector_HealthFilter_NeverChecked(t *testing.T) {
 	healthStore := storage.NewHealthStore()
 	configLoader := createTestConfig(t, 2)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// No health check recorded — conservative: excluded.
 	sel := NewSelector(heightStore, nil, configLoader, logger)
@@ -797,12 +752,12 @@ func TestSelector_HealthFilter_IndependentProtocols(t *testing.T) {
 	healthStore := storage.NewHealthStore()
 	configLoader := createTestConfig(t, 2)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// Healthy for rpc, unhealthy for api.
 	healthStore.SetHealthy("pocket", "node-1", "rpc")
-	healthStore.SetUnhealthy("pocket", "node-1", "api", "broken")
+	healthStore.SetUnhealthy("pocket", "node-1", "rest", "broken")
 
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
@@ -828,7 +783,7 @@ func TestSelector_HealthFilter_NotSet_NoFiltering(t *testing.T) {
 	heightStore := storage.NewHeightStore()
 	configLoader := createTestConfig(t, 2)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// No HealthStore — V1 mode.
 	sel := NewSelector(heightStore, nil, configLoader, logger)
@@ -848,10 +803,10 @@ func TestSelector_HealthFilter_RecoveredNode(t *testing.T) {
 	healthStore := storage.NewHealthStore()
 	configLoader := createTestConfig(t, 2)
 
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
 
 	// Unhealthy.
-	healthStore.SetUnhealthy("pocket", "node-1", "api", "down")
+	healthStore.SetUnhealthy("pocket", "node-1", "rest", "down")
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
 
@@ -861,7 +816,7 @@ func TestSelector_HealthFilter_RecoveredNode(t *testing.T) {
 	}
 
 	// Recover.
-	healthStore.SetHealthy("pocket", "node-1", "api")
+	healthStore.SetHealthy("pocket", "node-1", "rest")
 
 	m, nodeName, _ := sel.GetBestNode("pocket", "api")
 	if m == nil {
@@ -879,12 +834,12 @@ func TestSelector_HealthFilter_PrefersHealthyOverHigher(t *testing.T) {
 	configLoader := createTestConfig(t, 2)
 
 	// node-1 higher, node-2 lower.
-	heightStore.Update("pocket", "node-1", "api", 100, 50*time.Millisecond, "internal")
-	heightStore.Update("pocket", "node-2", "api", 99, 30*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-1", "rpc", 100, 50*time.Millisecond, "internal")
+	heightStore.Update("pocket", "node-2", "rpc", 99, 30*time.Millisecond, "internal")
 
 	// node-1 unhealthy, node-2 healthy.
-	healthStore.SetUnhealthy("pocket", "node-1", "api", "timeout")
-	healthStore.SetHealthy("pocket", "node-2", "api")
+	healthStore.SetUnhealthy("pocket", "node-1", "rest", "timeout")
+	healthStore.SetHealthy("pocket", "node-2", "rest")
 
 	sel := NewSelector(heightStore, nil, configLoader, logger)
 	sel.SetHealthStore(healthStore)
@@ -898,5 +853,278 @@ func TestSelector_HealthFilter_PrefersHealthyOverHigher(t *testing.T) {
 	}
 	if m.Height != 99 {
 		t.Fatalf("expected height 99, got %d", m.Height)
+	}
+}
+
+// --- normalizeProtocol tests ---
+
+func TestNormalizeProtocol(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		endpointType string
+		want         string
+	}{
+		{
+			name:         "api maps to rest",
+			endpointType: "api",
+			want:         "rest",
+		},
+		{
+			name:         "rpc unchanged",
+			endpointType: "rpc",
+			want:         "rpc",
+		},
+		{
+			name:         "grpc unchanged",
+			endpointType: "grpc",
+			want:         "grpc",
+		},
+		{
+			name:         "jsonrpc unchanged",
+			endpointType: "jsonrpc",
+			want:         "jsonrpc",
+		},
+		{
+			name:         "http unchanged",
+			endpointType: "http",
+			want:         "http",
+		},
+		{
+			name:         "websocket unchanged",
+			endpointType: "websocket",
+			want:         "websocket",
+		},
+		{
+			name:         "empty string unchanged",
+			endpointType: "",
+			want:         "",
+		},
+		{
+			name:         "rest unchanged (no double mapping)",
+			endpointType: "rest",
+			want:         "rest",
+		},
+		{
+			name:         "unknown type unchanged",
+			endpointType: "graphql",
+			want:         "graphql",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeProtocol(tt.endpointType)
+			if got != tt.want {
+				t.Errorf("normalizeProtocol(%q) = %q, want %q", tt.endpointType, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- heightCheckProtocol tests ---
+
+// createMultiChainTestConfig creates a temp YAML config with multiple chain types and returns a MultiChainLoader.
+func createMultiChainTestConfig(t *testing.T) *config.MultiChainLoader {
+	t.Helper()
+
+	configContent := `listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+      - protocol: rpc
+        listen: ":8081"
+  - name: cosmos-no-protocol
+    type: cosmos
+    height_check:
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8180"
+      - protocol: rpc
+        listen: ":8181"
+  - name: cosmos-explicit-rest
+    type: cosmos
+    height_check:
+      protocol: rest
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8280"
+  - name: ethereum
+    type: evm
+    height_check:
+      interval: 12s
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9080"
+  - name: solana-mainnet
+    type: solana
+    height_check:
+      interval: 5s
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9180"
+  - name: mina
+    type: custom
+    height_check:
+      interval: 30s
+      method: POST
+      url_path: /graphql
+      headers:
+        Content-Type: application/json
+      body: '{"query":"{ bestChain(maxLength:1) { protocolState { consensusState { blockHeight } } } }"}'
+      response_path: ".data.bestChain[0].protocolState.consensusState.blockHeight"
+      response_format: integer
+    endpoints:
+      - protocol: http
+        listen: ":9200"
+  - name: custom-explicit-protocol
+    type: custom
+    height_check:
+      protocol: graphql
+      interval: 30s
+      method: POST
+      url_path: /graphql
+      headers:
+        Content-Type: application/json
+      body: '{"query":"{ height }"}'
+      response_path: ".data.height"
+      response_format: integer
+    endpoints:
+      - protocol: http
+        listen: ":9300"
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "http://localhost:1317"
+      rpc: "http://localhost:26657"
+`
+
+	return testutil.NewMultiChainLoader(t, configContent)
+}
+
+func TestHeightCheckProtocol(t *testing.T) {
+	t.Parallel()
+
+	loader := createMultiChainTestConfig(t)
+
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	sel := NewSelector(heightStore, nil, loader, logger)
+
+	tests := []struct {
+		name    string
+		network string
+		want    string
+	}{
+		{
+			name:    "network not found falls back to rpc",
+			network: "nonexistent",
+			want:    "rpc",
+		},
+		{
+			name:    "cosmos network without explicit protocol returns rpc",
+			network: "cosmos-no-protocol",
+			want:    "rpc",
+		},
+		{
+			name:    "cosmos network with explicit protocol rpc returns rpc",
+			network: "pocket",
+			want:    "rpc",
+		},
+		{
+			name:    "cosmos network with explicit protocol rest returns rest",
+			network: "cosmos-explicit-rest",
+			want:    "rest",
+		},
+		{
+			name:    "evm network without explicit protocol returns jsonrpc",
+			network: "ethereum",
+			want:    "jsonrpc",
+		},
+		{
+			name:    "solana network without explicit protocol returns jsonrpc",
+			network: "solana-mainnet",
+			want:    "jsonrpc",
+		},
+		{
+			name:    "custom network without explicit protocol uses first endpoint protocol",
+			network: "mina",
+			want:    "http",
+		},
+		{
+			name:    "custom network with explicit protocol uses it",
+			network: "custom-explicit-protocol",
+			want:    "graphql",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sel.heightCheckProtocol(tt.network)
+			if got != tt.want {
+				t.Errorf("heightCheckProtocol(%q) = %q, want %q", tt.network, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHeightCheckProtocolCustomMultipleEndpoints verifies that when a custom network
+// has multiple endpoints and no explicit height_check protocol, the first endpoint's
+// protocol is returned (not a later one).
+func TestHeightCheckProtocolCustomMultipleEndpoints(t *testing.T) {
+	t.Parallel()
+
+	configContent := `listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: multi-ep-custom
+    type: custom
+    height_check:
+      interval: 30s
+      method: POST
+      url_path: /graphql
+      headers:
+        Content-Type: application/json
+      body: '{"query":"{ height }"}'
+      response_path: ".data.height"
+      response_format: integer
+    endpoints:
+      - protocol: graphql
+        listen: ":9400"
+      - protocol: http
+        listen: ":9401"
+internals:
+  - name: node-x
+    network: multi-ep-custom
+    endpoints:
+      graphql: "http://localhost:9400"
+`
+
+	loader := testutil.NewMultiChainLoader(t, configContent)
+	logger := zap.NewNop()
+	sel := NewSelector(storage.NewHeightStore(), nil, loader, logger)
+	got := sel.heightCheckProtocol("multi-ep-custom")
+	// Must return the FIRST endpoint's protocol, not the second.
+	if got != "graphql" {
+		t.Errorf("heightCheckProtocol(custom multi-endpoint) = %q, want %q", got, "graphql")
 	}
 }

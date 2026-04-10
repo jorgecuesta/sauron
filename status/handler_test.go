@@ -4,79 +4,56 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
+	"time"
 
-	"sauron/config"
+	"sauron/internal/testutil"
 	"sauron/selector"
 	"sauron/storage"
-	"time"
 
 	"go.uber.org/zap"
 )
 
-// writeHandlerConfig writes a YAML config file and returns its path.
-// hasInternals controls whether internal nodes are included.
-func writeHandlerConfig(t *testing.T, hasInternals bool) string {
-	t.Helper()
-
-	internals := ""
-	if hasInternals {
-		internals = `
-internals:
-  - name: node-1
-    api: "https://node1.example.com"
-    network: pocket
-`
-	} else {
-		// Need at least one external when no internals
-		internals = `
-externals:
-  - name: ext-ring
-    rings:
-      - "https://ring1.example.com"
-`
-	}
-
-	content := `
-api: true
-rpc: false
-grpc: false
-auth: false
+// handlerYAML returns a V2 config YAML for handler tests.
+// hasInternals controls whether internal nodes or external rings are included.
+func handlerYAML(hasInternals bool) string {
+	base := `
 listen: ":3000"
+auth: false
 timeouts:
   health_check: 5s
   proxy: 30s
 networks:
   - name: pocket
-    api_listen: ":8080"
-    api: "https://api.pocket.example.com"
-` + internals
-
-	f, err := os.CreateTemp("", "sauron-handler-test-*.yaml")
-	if err != nil {
-		t.Fatalf("writeHandlerConfig: %v", err)
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+        advertise: "https://api.pocket.example.com"
+`
+	if hasInternals {
+		return base + `
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "https://node1.example.com"
+`
 	}
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("writeHandlerConfig write: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("writeHandlerConfig close: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Remove(f.Name()) })
-	return f.Name()
+	return base + `
+externals:
+  - name: ext-ring
+    rings:
+      - "https://ring1.example.com"
+`
 }
 
 // buildHandler creates a Handler+HeightStore for handler tests.
 func buildHandler(t *testing.T, hasInternals bool) (*Handler, *storage.HeightStore) {
 	t.Helper()
 	logger := zap.NewNop()
-	path := writeHandlerConfig(t, hasInternals)
-	loader, err := config.NewLoader(path, logger)
-	if err != nil {
-		t.Fatalf("buildHandler NewLoader: %v", err)
-	}
+	loader := testutil.NewMultiChainLoader(t, handlerYAML(hasInternals))
 	heightStore := storage.NewHeightStore()
 	endpointStore := storage.NewExternalEndpointStore(logger)
 	sel := selector.NewSelector(heightStore, endpointStore, loader, logger)
@@ -150,8 +127,9 @@ func TestStatus_ReturnsHeight(t *testing.T) {
 	t.Parallel()
 	h, heightStore := buildHandler(t, true)
 
-	// Populate the height store so the selector has data
-	heightStore.Update("pocket", "node-1", "api", 12345, 10*time.Millisecond, "internal")
+	// Populate the height store so the selector has data.
+	// For cosmos networks, the height-check protocol defaults to "rpc".
+	heightStore.Update("pocket", "node-1", "rpc", 12345, 10*time.Millisecond, "internal")
 
 	mux := http.NewServeMux()
 	h.SetupRoutes(mux)

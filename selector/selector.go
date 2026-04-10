@@ -22,7 +22,7 @@ type Selector struct {
 	endpointStore  *storage.ExternalEndpointStore
 	archivalFilter *ArchivalFilter // Optional: archival node filtering
 	syncFilter     *SyncFilter     // Optional: oracle drift filtering
-	configLoader   *config.Loader
+	configLoader   *config.MultiChainLoader
 	logger         *zap.Logger
 	rrCounters     sync.Map // map[string]*uint64 — per "network:type" round-robin counter
 }
@@ -43,7 +43,7 @@ type SelectionDecision struct {
 }
 
 // NewSelector creates a new node selector
-func NewSelector(store *storage.HeightStore, endpointStore *storage.ExternalEndpointStore, configLoader *config.Loader, logger *zap.Logger) *Selector {
+func NewSelector(store *storage.HeightStore, endpointStore *storage.ExternalEndpointStore, configLoader *config.MultiChainLoader, logger *zap.Logger) *Selector {
 	return &Selector{
 		store:         store,
 		endpointStore: endpointStore,
@@ -68,13 +68,66 @@ func (s *Selector) SetSyncFilter(f *SyncFilter) {
 	s.syncFilter = f
 }
 
-// GetBestNode returns the best node for the given network and endpoint type
-// The Eye sees all, the Dark Lord judges
-func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
-	// Get all internal nodes for this network and type
-	nodesMap := s.store.GetByNetwork(network, endpointType)
+// normalizeProtocol maps V1 endpoint type names to V2 protocol names.
+// Temporary bridge until task #21 refactors proxies to use V2 naming.
+func normalizeProtocol(endpointType string) string {
+	if endpointType == "api" {
+		return "rest"
+	}
+	return endpointType
+}
 
-	// Convert map to slice for easier processing.
+// heightCheckProtocol returns the protocol used for height checks for a network.
+// Falls back to "rpc" if the network or height check config is not found.
+func (s *Selector) heightCheckProtocol(network string) string {
+	cfg := s.configLoader.Get()
+	net := cfg.FindNetwork(network)
+	if net == nil {
+		return "rpc"
+	}
+	// The height check protocol is determined by the adapter factory.
+	// For native adapters (cosmos/evm/solana), the adapter chooses which
+	// protocol to use for height checks. HeightCheckProtocol() returns
+	// the explicit protocol from config, or "" for native adapters.
+	protocol := net.HeightCheckProtocol()
+	if protocol != "" {
+		return protocol
+	}
+
+	// Native adapter defaults based on chain type.
+	switch net.Type {
+	case "cosmos":
+		return "rpc"
+	case "evm":
+		return "jsonrpc"
+	case "solana":
+		return "jsonrpc"
+	default:
+		// For custom type, the height check protocol should be explicitly set.
+		// Fall back to the first endpoint protocol.
+		if len(net.Endpoints) > 0 {
+			return net.Endpoints[0].Protocol
+		}
+		return "rpc"
+	}
+}
+
+// GetBestNode returns the best node for the given network and endpoint type.
+//
+// V2 model: Heights are stored under the height-check protocol only.
+// The selector queries heights by the network's height-check protocol,
+// then filters by health for the requested endpoint type.
+func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
+	// Normalize V1 protocol names to V2.
+	requestedProtocol := normalizeProtocol(endpointType)
+
+	// Get the height-check protocol for this network.
+	heightProtocol := s.heightCheckProtocol(network)
+
+	// Get all internal nodes that have heights (via the height-check protocol).
+	nodesMap := s.store.GetByNetwork(network, heightProtocol)
+
+	// Convert map to slice for processing.
 	nodes := make([]nodeWithName, 0, len(nodesMap))
 	for name, m := range nodesMap {
 		nodes = append(nodes, nodeWithName{name: name, metrics: m})
@@ -82,20 +135,22 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 
 	s.logger.Debug("Selector: internal nodes retrieved",
 		zap.String("network", network),
-		zap.String("type", endpointType),
+		zap.String("requested_protocol", requestedProtocol),
+		zap.String("height_protocol", heightProtocol),
 		zap.Int("count", len(nodes)),
 	)
 
-	// Filter by protocol health if HealthStore is available.
+	// Filter by protocol health for the REQUESTED protocol (not height-check protocol).
+	// This ensures we only route to nodes where the requested endpoint is alive.
 	if s.healthStore != nil {
 		filtered := make([]nodeWithName, 0, len(nodes))
 		for _, n := range nodes {
-			if s.healthStore.IsHealthy(network, n.name, endpointType) {
+			if s.healthStore.IsHealthy(network, n.name, requestedProtocol) {
 				filtered = append(filtered, n)
 			} else {
 				s.logger.Debug("Selector: node excluded by health filter",
 					zap.String("node", n.name),
-					zap.String("protocol", endpointType),
+					zap.String("protocol", requestedProtocol),
 				)
 			}
 		}
@@ -117,18 +172,15 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	}
 
 	// Get external endpoints and check if we should include them
-	// Externals are added when: no healthy internals OR externals are ahead by threshold
 	if s.endpointStore != nil {
 		externalEndpoints := s.endpointStore.GetValidatedEndpoints(network, endpointType)
 
-		// Get threshold from config (default to 2 blocks)
 		cfg := s.configLoader.Get()
 		threshold := cfg.ExternalFailoverThreshold
 		if threshold == 0 {
-			threshold = 2 // default threshold
+			threshold = 2
 		}
 
-		// Find max external height
 		var maxExternalHeight int64
 		for _, ep := range externalEndpoints {
 			if ep.Height > maxExternalHeight {
@@ -136,7 +188,6 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 			}
 		}
 
-		// Add externals if: no healthy internals OR externals are significantly ahead
 		shouldAddExternals := maxInternalHeight == 0 || maxExternalHeight > maxInternalHeight+threshold
 
 		if shouldAddExternals && len(externalEndpoints) > 0 {
@@ -150,8 +201,6 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 			)
 
 			for _, ep := range externalEndpoints {
-				// Create a synthetic "node" entry for this external endpoint
-				// Use URL as the identifier (prefixed with "ext:" to distinguish from internal nodes)
 				nodeName := "ext:" + ep.URL
 				nodeMetrics := &storage.NodeMetrics{
 					Height:             ep.Height,
@@ -161,12 +210,6 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 					WebSocketAvailable: ep.WebSocketAvailable,
 				}
 				nodes = append(nodes, nodeWithName{name: nodeName, metrics: nodeMetrics})
-
-				s.logger.Debug("Selector: added external endpoint to candidates",
-					zap.String("url", ep.URL),
-					zap.Int64("height", ep.Height),
-					zap.Duration("latency", ep.Latency),
-				)
 			}
 		} else {
 			s.logger.Debug("Selector: using internal nodes only",
@@ -188,17 +231,10 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		return nil, "", nil
 	}
 
-	s.logger.Debug("Selector: total candidates",
-		zap.String("network", network),
-		zap.String("type", endpointType),
-		zap.Int("total", len(nodes)),
-	)
-
 	decision := &SelectionDecision{
 		Candidates: len(nodes),
 	}
 
-	// Record alternatives considered
 	metrics.RoutingAlternativesConsidered.WithLabelValues(network, endpointType).Observe(float64(len(nodes)))
 
 	// Step 1: Find the maximum height
@@ -215,12 +251,6 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		)
 	}
 	decision.MaxHeight = maxHeight
-
-	s.logger.Debug("Selector: max height determined",
-		zap.String("network", network),
-		zap.String("type", endpointType),
-		zap.Int64("max_height", maxHeight),
-	)
 
 	if maxHeight == 0 {
 		s.logger.Warn("All nodes have zero height",
@@ -240,19 +270,18 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 		}
 	}
 
-	// Step 2b: Sort maxHeightNodes by name for deterministic round-robin (M23)
+	// Step 2b: Sort by name for deterministic round-robin
 	sort.Slice(maxHeightNodes, func(i, j int) bool {
 		return maxHeightNodes[i].name < maxHeightNodes[j].name
 	})
 
-	// Step 3: Among nodes with max height, distribute using per-key round-robin (M24)
+	// Step 3: Round-robin among max-height nodes
 	rrKey := network + ":" + endpointType
 	counterPtr, _ := s.rrCounters.LoadOrStore(rrKey, new(uint64))
 	counter := atomic.AddUint64(counterPtr.(*uint64), 1)
 	selectedIndex := int(counter % uint64(len(maxHeightNodes)))
 	bestNode := maxHeightNodes[selectedIndex]
 
-	// Determine selection reason
 	if len(nodes) == 1 {
 		decision.Reason = "only_available"
 	} else if len(maxHeightNodes) == 1 {
@@ -264,7 +293,6 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	decision.SelectedNode = bestNode.name
 	decision.SelectedLatency = bestNode.metrics.AvgLatency
 
-	// Record metrics — use node source category to avoid cardinality explosion (H10)
 	nodeSource := bestNode.metrics.Source
 	if nodeSource == "" {
 		nodeSource = "internal"
@@ -290,29 +318,31 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	return bestNode.metrics, bestNode.name, decision
 }
 
-// GetEndpointURL returns the full endpoint URL for a node
+// GetEndpointURL returns the full endpoint URL for a node.
+// Uses V2 MultiChainNode.Endpoints map for URL lookup.
 func (s *Selector) GetEndpointURL(nodeName, endpointType string) string {
 	cfg := s.configLoader.Get()
+
+	// Normalize V1 protocol names to V2.
+	protocol := normalizeProtocol(endpointType)
 
 	// Search in internal nodes
 	for _, node := range cfg.Internals {
 		if node.Name == nodeName {
-			switch endpointType {
-			case "api":
-				return urlutil.NormalizeURL(node.API)
-			case "rpc":
-				return urlutil.NormalizeURL(node.RPC)
-			case "grpc":
-				return node.GRPC // gRPC doesn't need normalization
+			url := node.Endpoints[protocol]
+			if url == "" {
+				return ""
 			}
+			if protocol == "grpc" {
+				return url // gRPC doesn't need normalization
+			}
+			return urlutil.NormalizeURL(url)
 		}
 	}
 
 	// Check if it's an external endpoint (nodeName format: "ext:{url}")
-	// External endpoints are identified by their URL stored in the node name
 	if len(nodeName) > 4 && nodeName[:4] == "ext:" {
-		url := nodeName[4:]
-		return url
+		return nodeName[4:]
 	}
 
 	s.logger.Warn("Node not found in configuration",
@@ -323,27 +353,33 @@ func (s *Selector) GetEndpointURL(nodeName, endpointType string) string {
 	return ""
 }
 
-// GetHighestHeights returns the highest height for each enabled endpoint type
-// Used by the status API
+// GetHighestHeights returns the highest height for each enabled endpoint type.
+// In V2, all protocols share the same height (from the height-check protocol),
+// so the height is the same across all protocols for a network.
 func (s *Selector) GetHighestHeights(network string, enabledTypes []string) map[string]int64 {
 	result := make(map[string]int64)
 
-	for _, typ := range enabledTypes {
-		// Get highest height from internal nodes
-		height := s.store.GetHighestHeight(network, typ)
+	// Get the height-check protocol for this network.
+	heightProtocol := s.heightCheckProtocol(network)
 
-		// Also check external endpoints
+	// Get highest height from internal nodes (via height-check protocol).
+	height := s.store.GetHighestHeight(network, heightProtocol)
+
+	// Also check external endpoints for each type.
+	for _, typ := range enabledTypes {
+		h := height
+
 		if s.endpointStore != nil {
 			externalEndpoints := s.endpointStore.GetValidatedEndpoints(network, typ)
 			for _, ep := range externalEndpoints {
-				if ep.Height > height {
-					height = ep.Height
+				if ep.Height > h {
+					h = ep.Height
 				}
 			}
 		}
 
-		if height > 0 {
-			result[typ] = height
+		if h > 0 {
+			result[typ] = h
 		}
 	}
 

@@ -153,3 +153,55 @@ func (n *MultiChainNetwork) HeightCheckInterval() time.Duration {
 	}
 	return 30 * time.Second
 }
+
+// HeightCheckProtocol returns the protocol used for height checks.
+// For native adapters (cosmos, evm, solana) without explicit protocol, returns "".
+// The adapter factory determines the default in that case.
+func (n *MultiChainNetwork) HeightCheckProtocol() string {
+	if n.HeightCheck != nil {
+		return n.HeightCheck.Protocol
+	}
+	return ""
+}
+
+// GetEnabledTypes returns all unique protocol names across all network endpoints.
+// This replaces the V1 approach of global API/RPC/GRPC boolean flags.
+func (c *MultiChainConfig) GetEnabledTypes() []string {
+	seen := make(map[string]bool)
+	var types []string
+	for _, net := range c.Networks {
+		for _, ep := range net.Endpoints {
+			if !seen[ep.Protocol] {
+				seen[ep.Protocol] = true
+				types = append(types, ep.Protocol)
+			}
+		}
+	}
+	return types
+}
+
+// GetUserPermissions returns all protocols a user has access to across all networks.
+// For "all" permissions, returns GetEnabledTypes(). For specific permissions,
+// returns the union of all allowed protocols across networks.
+func (c *MultiChainConfig) GetUserPermissions(token string) []string {
+	user := c.FindUser(token)
+	if user == nil {
+		return c.GetEnabledTypes()
+	}
+
+	if user.Permissions.All {
+		return c.GetEnabledTypes()
+	}
+
+	seen := make(map[string]bool)
+	var types []string
+	for _, protos := range user.Permissions.Networks {
+		for proto, allowed := range protos {
+			if allowed && !seen[proto] {
+				seen[proto] = true
+				types = append(types, proto)
+			}
+		}
+	}
+	return types
+}

@@ -26,7 +26,7 @@ import (
 type ExternalChecker struct {
 	store           *storage.HeightStore
 	endpointStore   *storage.ExternalEndpointStore
-	configLoader    *config.Loader
+	configLoader    *config.MultiChainLoader
 	client          *http.Client
 	logger          *zap.Logger
 	grpcConnections *xsync.Map[string, *grpc.ClientConn] // url -> connection pool for external gRPC endpoints
@@ -43,7 +43,7 @@ type ExternalStatusResponse struct {
 }
 
 // NewExternalChecker creates a new external checker
-func NewExternalChecker(store *storage.HeightStore, endpointStore *storage.ExternalEndpointStore, configLoader *config.Loader, logger *zap.Logger) *ExternalChecker {
+func NewExternalChecker(store *storage.HeightStore, endpointStore *storage.ExternalEndpointStore, configLoader *config.MultiChainLoader, logger *zap.Logger) *ExternalChecker {
 	return &ExternalChecker{
 		store:         store,
 		endpointStore: endpointStore,

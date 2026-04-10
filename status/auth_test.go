@@ -3,10 +3,10 @@ package status
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"sauron/config"
+	"sauron/internal/testutil"
 	"sauron/selector"
 	"sauron/storage"
 
@@ -14,54 +14,36 @@ import (
 )
 
 // createAuthTestLoader writes a temporary YAML config with auth=true and one user,
-// then returns a *config.Loader backed by that file.
-func createAuthTestLoader(t *testing.T) *config.Loader {
+// then returns a *config.MultiChainLoader backed by that file.
+func createAuthTestLoader(t *testing.T) *config.MultiChainLoader {
 	t.Helper()
 
-	content := `
-api: true
-rpc: false
-grpc: false
-auth: true
+	return testutil.NewMultiChainLoader(t, `
 listen: ":3000"
+auth: true
 timeouts:
   health_check: 5s
   proxy: 30s
 networks:
   - name: pocket
-    api_listen: ":8080"
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
 internals:
   - name: node-1
-    api: "https://node1.example.com"
     network: pocket
+    endpoints:
+      rest: "https://node1.example.com"
 users:
   - name: alice
     token: "valid-token-abc"
-    api: true
-    rpc: false
-    grpc: false
-`
-	f, err := os.CreateTemp("", "sauron-auth-test-*.yaml")
-	if err != nil {
-		t.Fatalf("createAuthTestLoader: create temp file: %v", err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("createAuthTestLoader: write config: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("createAuthTestLoader: close file: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Remove(f.Name()) })
-
-	loader, err := config.NewLoader(f.Name(), zap.NewNop())
-	if err != nil {
-		t.Fatalf("createAuthTestLoader: NewLoader: %v", err)
-	}
-	return loader
+    permissions: all
+`)
 }
 
 // buildHandlerForLoader wires up a real Handler using the provided loader.
-func buildHandlerForLoader(loader *config.Loader) *Handler {
+func buildHandlerForLoader(loader *config.MultiChainLoader) *Handler {
 	logger := zap.NewNop()
 	heightStore := storage.NewHeightStore()
 	endpointStore := storage.NewExternalEndpointStore(logger)
@@ -188,13 +170,13 @@ func TestAuth_EnabledTypesInContext(t *testing.T) {
 	}
 	found := false
 	for _, typ := range capturedTypes {
-		if typ == "api" {
+		if typ == "rest" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected 'api' in enabled types, got %v", capturedTypes)
+		t.Errorf("expected 'rest' in enabled types, got %v", capturedTypes)
 	}
 }
 
