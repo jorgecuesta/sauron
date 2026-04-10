@@ -14,8 +14,8 @@ import (
 type contextKey string
 
 const (
-	contextKeyEnabledTypes contextKey = "enabled_types"
-	contextKeyRequestID    contextKey = "request_id"
+	contextKeyUser      contextKey = "user"
+	contextKeyRequestID contextKey = "request_id"
 )
 
 // authMiddleware checks Bearer token authentication
@@ -57,17 +57,12 @@ func (h *Handler) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get user's enabled types
-		enabledTypes := cfg.GetUserPermissions(token)
-
-		// Add user info to context
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, contextKeyEnabledTypes, enabledTypes)
+		// Store the authenticated user in context for per-network permission checks.
+		ctx := context.WithValue(r.Context(), contextKeyUser, user)
 		r = r.WithContext(ctx)
 
 		h.logger.Debug("User authenticated",
 			zap.String("user", user.Name),
-			zap.Strings("enabled_types", enabledTypes),
 		)
 
 		// Continue to next handler

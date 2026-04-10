@@ -160,8 +160,8 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	network := parts[0]
 
-	// Get user permissions from context (set by auth middleware)
-	enabledTypes := h.getEnabledTypes(r)
+	// Get user permissions for this network (set by auth middleware)
+	enabledTypes := h.getEnabledTypes(r, network)
 
 	// Get highest heights for each endpoint type
 	heights := h.selector.GetHighestHeights(network, enabledTypes)
@@ -259,19 +259,44 @@ func getRequestID(r *http.Request) string {
 	return "unknown"
 }
 
-// getEnabledTypes returns the enabled endpoint types for the request
-// If auth is enabled, returns user-specific types from context
-// Otherwise, returns globally enabled types
-func (h *Handler) getEnabledTypes(r *http.Request) []string {
+// getEnabledTypes returns the endpoint types the request is allowed to see
+// for the given network. When auth is enabled, filters by per-network
+// per-protocol permissions. Otherwise, returns all protocols for the network.
+func (h *Handler) getEnabledTypes(r *http.Request, network string) []string {
 	cfg := h.configLoader.Get()
 
-	// If auth is enabled, get types from context (set by auth middleware)
-	if cfg.Auth {
-		if types, ok := r.Context().Value(contextKeyEnabledTypes).([]string); ok {
-			return types
-		}
+	net := cfg.FindNetwork(network)
+	if net == nil {
+		return nil
 	}
 
-	// Return globally enabled types
-	return cfg.GetEnabledTypes()
+	// Collect all protocol names for this network.
+	allProtocols := make([]string, 0, len(net.Endpoints))
+	for _, ep := range net.Endpoints {
+		allProtocols = append(allProtocols, ep.Protocol)
+	}
+
+	// If auth is disabled or no user in context, return all protocols.
+	if !cfg.Auth {
+		return allProtocols
+	}
+
+	user, ok := r.Context().Value(contextKeyUser).(*config.MultiChainUser)
+	if !ok || user == nil {
+		return allProtocols
+	}
+
+	// "all" permissions → full access.
+	if user.Permissions.All {
+		return allProtocols
+	}
+
+	// Filter by per-network per-protocol permissions.
+	var allowed []string
+	for _, proto := range allProtocols {
+		if user.Permissions.HasAccess(network, proto) {
+			allowed = append(allowed, proto)
+		}
+	}
+	return allowed
 }

@@ -1,9 +1,11 @@
 package status
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"sauron/config"
 	"sauron/internal/testutil"
@@ -143,15 +145,15 @@ func TestAuth_WrongToken(t *testing.T) {
 	}
 }
 
-func TestAuth_EnabledTypesInContext(t *testing.T) {
+func TestAuth_UserInContext(t *testing.T) {
 	t.Parallel()
 	loader := createAuthTestLoader(t)
 	h := buildHandlerForLoader(loader)
 
-	var capturedTypes []string
+	var capturedUser *config.MultiChainUser
 	capturing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if types, ok := r.Context().Value(contextKeyEnabledTypes).([]string); ok {
-			capturedTypes = types
+		if user, ok := r.Context().Value(contextKeyUser).(*config.MultiChainUser); ok {
+			capturedUser = user
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -165,18 +167,11 @@ func TestAuth_EnabledTypesInContext(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	if len(capturedTypes) == 0 {
-		t.Fatal("expected enabled types in context, got none")
+	if capturedUser == nil {
+		t.Fatal("expected user in context, got nil")
 	}
-	found := false
-	for _, typ := range capturedTypes {
-		if typ == "rest" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected 'rest' in enabled types, got %v", capturedTypes)
+	if capturedUser.Name != "alice" {
+		t.Errorf("expected user 'alice', got %q", capturedUser.Name)
 	}
 }
 
@@ -198,5 +193,173 @@ func TestAuth_EmptyToken(t *testing.T) {
 	}
 	if called {
 		t.Error("expected next handler NOT to be called for empty token")
+	}
+}
+
+// createPerNetworkAuthLoader creates a config with two networks and users
+// with per-network per-protocol permissions for testing granular access.
+func createPerNetworkAuthLoader(t *testing.T) *config.MultiChainLoader {
+	t.Helper()
+
+	return testutil.NewMultiChainLoader(t, `
+listen: ":3000"
+auth: true
+timeouts:
+  health_check: 5s
+  proxy: 30s
+networks:
+  - name: pocket
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+        advertise: "https://pocket-rest.example.com"
+      - protocol: rpc
+        listen: ":8081"
+        advertise: "https://pocket-rpc.example.com"
+  - name: ethereum
+    type: evm
+    height_check:
+      interval: 12s
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9080"
+        advertise: "https://eth-jsonrpc.example.com"
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "http://node1:1317"
+      rpc: "http://node1:26657"
+  - name: eth-1
+    network: ethereum
+    endpoints:
+      jsonrpc: "http://geth1:8545"
+users:
+  - name: admin
+    token: "admin-token"
+    permissions: all
+  - name: pocket-rest-only
+    token: "rest-token"
+    permissions:
+      pocket:
+        rest: true
+        rpc: false
+  - name: eth-user
+    token: "eth-token"
+    permissions:
+      ethereum:
+        jsonrpc: true
+`)
+}
+
+func TestAuth_PerNetworkPermissions_RestOnly(t *testing.T) {
+	t.Parallel()
+
+	loader := createPerNetworkAuthLoader(t)
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	endpointStore := storage.NewExternalEndpointStore(logger)
+	sel := selector.NewSelector(heightStore, endpointStore, loader, logger)
+	h := NewHandler(sel, loader, logger)
+	t.Cleanup(h.Shutdown)
+
+	// Seed heights so the status endpoint has data.
+	heightStore.Update("pocket", "node-1", "rpc", 100, 5*time.Millisecond, "internal")
+
+	mux := http.NewServeMux()
+	h.SetupRoutes(mux)
+
+	// User "pocket-rest-only" requests pocket/status — should only see "rest" endpoint.
+	req := httptest.NewRequest(http.MethodGet, "/pocket/status", nil)
+	req.Header.Set("Authorization", "Bearer rest-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	var resp StatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.API == "" {
+		t.Error("expected API (rest) endpoint in response, got empty")
+	}
+	if resp.RPC != "" {
+		t.Errorf("expected no RPC endpoint for rest-only user, got %q", resp.RPC)
+	}
+}
+
+func TestAuth_PerNetworkPermissions_NoAccessToNetwork(t *testing.T) {
+	t.Parallel()
+
+	loader := createPerNetworkAuthLoader(t)
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	endpointStore := storage.NewExternalEndpointStore(logger)
+	sel := selector.NewSelector(heightStore, endpointStore, loader, logger)
+	h := NewHandler(sel, loader, logger)
+	t.Cleanup(h.Shutdown)
+
+	heightStore.Update("ethereum", "eth-1", "jsonrpc", 5000, 3*time.Millisecond, "internal")
+
+	mux := http.NewServeMux()
+	h.SetupRoutes(mux)
+
+	// User "pocket-rest-only" requests ethereum/status — no permissions for ethereum.
+	req := httptest.NewRequest(http.MethodGet, "/ethereum/status", nil)
+	req.Header.Set("Authorization", "Bearer rest-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// Should get 404 — user has no access to any ethereum protocols,
+	// so enabledTypes is empty and heights map is empty.
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for user with no ethereum access, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestAuth_PerNetworkPermissions_AdminSeesAll(t *testing.T) {
+	t.Parallel()
+
+	loader := createPerNetworkAuthLoader(t)
+	logger := zap.NewNop()
+	heightStore := storage.NewHeightStore()
+	endpointStore := storage.NewExternalEndpointStore(logger)
+	sel := selector.NewSelector(heightStore, endpointStore, loader, logger)
+	h := NewHandler(sel, loader, logger)
+	t.Cleanup(h.Shutdown)
+
+	heightStore.Update("pocket", "node-1", "rpc", 100, 5*time.Millisecond, "internal")
+
+	mux := http.NewServeMux()
+	h.SetupRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/pocket/status", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp StatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Admin should see both rest and rpc endpoints.
+	if resp.API == "" {
+		t.Error("expected API (rest) endpoint for admin")
+	}
+	if resp.RPC == "" {
+		t.Error("expected RPC endpoint for admin")
 	}
 }

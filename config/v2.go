@@ -179,29 +179,3 @@ func (c *MultiChainConfig) GetEnabledTypes() []string {
 	}
 	return types
 }
-
-// GetUserPermissions returns all protocols a user has access to across all networks.
-// For "all" permissions, returns GetEnabledTypes(). For specific permissions,
-// returns the union of all allowed protocols across networks.
-func (c *MultiChainConfig) GetUserPermissions(token string) []string {
-	user := c.FindUser(token)
-	if user == nil {
-		return c.GetEnabledTypes()
-	}
-
-	if user.Permissions.All {
-		return c.GetEnabledTypes()
-	}
-
-	seen := make(map[string]bool)
-	var types []string
-	for _, protos := range user.Permissions.Networks {
-		for proto, allowed := range protos {
-			if allowed && !seen[proto] {
-				seen[proto] = true
-				types = append(types, proto)
-			}
-		}
-	}
-	return types
-}
