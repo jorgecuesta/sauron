@@ -32,14 +32,11 @@ type ExternalChecker struct {
 	grpcConnections *xsync.Map[string, *grpc.ClientConn] // url -> connection pool for external gRPC endpoints
 }
 
-// ExternalStatusResponse represents the response from another Sauron's status API
-// Contains the max height and advertised connection endpoints
+// ExternalStatusResponse represents the V2 response from another Sauron's status API.
+// Endpoints is a map of protocol → advertised URL.
 type ExternalStatusResponse struct {
-	Height       int64  `json:"height"`                  // Maximum height reported by external ring
-	API          string `json:"api,omitempty"`           // External API endpoint URL (if advertised)
-	RPC          string `json:"rpc,omitempty"`           // External RPC endpoint URL (if advertised)
-	GRPC         string `json:"grpc,omitempty"`          // External gRPC endpoint URL (if advertised)
-	GRPCInsecure bool   `json:"grpc_insecure,omitempty"` // Whether advertised gRPC endpoint uses insecure (no TLS)
+	Height    int64             `json:"height"`              // Maximum height reported by external ring
+	Endpoints map[string]string `json:"endpoints,omitempty"` // protocol → advertised URL
 }
 
 // NewExternalChecker creates a new external checker
@@ -133,35 +130,21 @@ func (c *ExternalChecker) queryRing(ctx context.Context, external config.Externa
 		return fmt.Errorf("external ring returned zero height")
 	}
 
-	// Store advertised endpoints in endpoint store
-	// This makes them visible but not validated yet
-	// NOTE: We do NOT update the HeightStore here - external endpoints are only tracked
-	// in the ExternalEndpointStore. The selector will add them to the candidate pool
-	// with the "ext:{url}" prefix when needed.
-	advertisedTypes := []string{}
-	if status.API != "" {
-		c.endpointStore.StoreAdvertised(external.Name, ringURL, network, "api", status.API)
-		metrics.NodeHeight.WithLabelValues(network, external.Name, "api", "external").Set(float64(status.Height))
-		advertisedTypes = append(advertisedTypes, "api")
+	// Store advertised endpoints in endpoint store.
+	// This makes them visible but not validated yet.
+	// NOTE: We do NOT update the HeightStore here — external endpoints are only
+	// tracked in ExternalEndpointStore. The selector adds them to the candidate
+	// pool with the "ext:{url}" prefix when needed.
+	var advertisedTypes []string
+	for protocol, epURL := range status.Endpoints {
+		if epURL == "" {
+			continue
+		}
+		c.endpointStore.StoreAdvertised(external.Name, ringURL, network, protocol, epURL)
+		metrics.NodeHeight.WithLabelValues(network, external.Name, protocol, "external").Set(float64(status.Height))
+		advertisedTypes = append(advertisedTypes, protocol)
 
-		// Validate endpoint (connectivity check only, insecure=false for HTTP)
-		c.validateEndpoint(ctx, external.Name, ringURL, network, "api", status.API, status.Height, false)
-	}
-	if status.RPC != "" {
-		c.endpointStore.StoreAdvertised(external.Name, ringURL, network, "rpc", status.RPC)
-		metrics.NodeHeight.WithLabelValues(network, external.Name, "rpc", "external").Set(float64(status.Height))
-		advertisedTypes = append(advertisedTypes, "rpc")
-
-		// Validate endpoint (insecure=false for HTTP)
-		c.validateEndpoint(ctx, external.Name, ringURL, network, "rpc", status.RPC, status.Height, false)
-	}
-	if status.GRPC != "" {
-		c.endpointStore.StoreAdvertised(external.Name, ringURL, network, "grpc", status.GRPC)
-		metrics.NodeHeight.WithLabelValues(network, external.Name, "grpc", "external").Set(float64(status.Height))
-		advertisedTypes = append(advertisedTypes, "grpc")
-
-		// Validate endpoint (pass grpc_insecure value)
-		c.validateEndpoint(ctx, external.Name, ringURL, network, "grpc", status.GRPC, status.Height, status.GRPCInsecure)
+		c.validateEndpoint(ctx, external.Name, ringURL, network, protocol, epURL, status.Height)
 	}
 
 	// Update metrics
@@ -193,19 +176,20 @@ func (c *ExternalChecker) recordError(externalName, ringURL, errorType string, e
 // validateEndpoint performs a connectivity check on an advertised endpoint
 // Verifies the endpoint is reachable and functional
 // useInsecure parameter is only used for gRPC endpoints to determine TLS settings
-func (c *ExternalChecker) validateEndpoint(ctx context.Context, externalName, ringURL, network, endpointType, url string, height int64, useInsecure bool) {
+func (c *ExternalChecker) validateEndpoint(ctx context.Context, externalName, ringURL, network, endpointType, url string, height int64) {
 	start := time.Now()
 
 	var err error
 	var latency time.Duration
 
 	switch endpointType {
-	case "api", "rpc":
-		// For HTTP endpoints, do a simple GET request to check connectivity
-		latency, err = c.validateHTTPEndpoint(ctx, url)
 	case "grpc":
-		// For gRPC endpoints, perform actual validation with GetLatestBlock call
-		latency, err = c.validateGRPCEndpoint(ctx, url, useInsecure)
+		// gRPC validation — use insecure by default for external gRPC endpoints
+		// since we don't have per-external node TLS config.
+		latency, err = c.validateGRPCEndpoint(ctx, url, true)
+	default:
+		// All non-gRPC protocols (rest, rpc, jsonrpc, http) use HTTP validation.
+		latency, err = c.validateHTTPEndpoint(ctx, url)
 	}
 
 	if err != nil {
@@ -224,17 +208,16 @@ func (c *ExternalChecker) validateEndpoint(ctx context.Context, externalName, ri
 	// Mark as validated with the advertised height and measured latency
 	c.endpointStore.MarkValidated(externalName, ringURL, network, endpointType, url, height, latency)
 
-	// For RPC endpoints, also check WebSocket connectivity
+	// For RPC endpoints (Cosmos Tendermint), also check WebSocket connectivity.
 	if endpointType == "rpc" {
 		wsAvailable := CheckWebSocket(ctx, url, c.logger)
 		c.endpointStore.UpdateWebSocketAvailability(externalName, ringURL, network, endpointType, url, wsAvailable)
 
-		// Update WebSocket availability metric
 		if wsAvailable {
-			metrics.NodeWebSocketAvailable.WithLabelValues(network, externalName, "rpc").Set(1)
+			metrics.NodeWebSocketAvailable.WithLabelValues(network, externalName, endpointType).Set(1)
 		} else {
-			metrics.NodeWebSocketAvailable.WithLabelValues(network, externalName, "rpc").Set(0)
-			metrics.WebSocketCheckErrors.WithLabelValues(network, externalName, "rpc", "connectivity_failed").Inc()
+			metrics.NodeWebSocketAvailable.WithLabelValues(network, externalName, endpointType).Set(0)
+			metrics.WebSocketCheckErrors.WithLabelValues(network, externalName, endpointType, "connectivity_failed").Inc()
 		}
 
 		c.logger.Debug("External endpoint validated",
@@ -396,12 +379,10 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 		var latency time.Duration
 
 		switch ep.Type {
-		case "api", "rpc":
-			latency, err = c.validateHTTPEndpoint(ctx, ep.URL)
 		case "grpc":
-			// Default to TLS (false) for recovery - safer default
-			// TODO: Store TLS preference in endpoint store for more accurate recovery
-			latency, err = c.validateGRPCEndpoint(ctx, ep.URL, false)
+			latency, err = c.validateGRPCEndpoint(ctx, ep.URL, true)
+		default:
+			latency, err = c.validateHTTPEndpoint(ctx, ep.URL)
 		}
 
 		if err != nil {
@@ -419,16 +400,16 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 		// Endpoint has recovered! Mark it as validated and working again
 		c.endpointStore.MarkValidated(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, ep.Height, latency)
 
-		// For RPC endpoints, also check WebSocket connectivity after recovery
+		// For RPC endpoints (Cosmos Tendermint), check WebSocket after recovery.
 		if ep.Type == "rpc" {
 			wsAvailable := CheckWebSocket(ctx, ep.URL, c.logger)
 			c.endpointStore.UpdateWebSocketAvailability(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, wsAvailable)
 
 			if wsAvailable {
-				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, "rpc").Set(1)
+				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, ep.Type).Set(1)
 			} else {
-				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, "rpc").Set(0)
-				metrics.WebSocketCheckErrors.WithLabelValues(ep.Network, ep.ExternalName, "rpc", "connectivity_failed").Inc()
+				metrics.NodeWebSocketAvailable.WithLabelValues(ep.Network, ep.ExternalName, ep.Type).Set(0)
+				metrics.WebSocketCheckErrors.WithLabelValues(ep.Network, ep.ExternalName, ep.Type, "connectivity_failed").Inc()
 			}
 		}
 
