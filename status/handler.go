@@ -24,13 +24,12 @@ type Handler struct {
 	rateLimiter  *RateLimiter
 }
 
-// StatusResponse represents the response format
-// Returns the maximum height and advertised endpoints for connecting to this Sauron
+// StatusResponse represents the response format.
+// Returns the maximum height and advertised endpoints for connecting to this Sauron.
+// Endpoints is a map of protocol name → advertised URL (e.g. "rest" → "https://...").
 type StatusResponse struct {
-	Height int64  `json:"height"`         // Maximum height across all endpoint types
-	API    string `json:"api,omitempty"`  // Advertised API endpoint URL
-	RPC    string `json:"rpc,omitempty"`  // Advertised RPC endpoint URL
-	GRPC   string `json:"grpc,omitempty"` // Advertised gRPC endpoint URL
+	Height    int64             `json:"height"`              // Maximum height across all endpoint types
+	Endpoints map[string]string `json:"endpoints,omitempty"` // protocol → advertised URL
 }
 
 // NewHandler creates a new status handler
@@ -184,28 +183,22 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build response with maximum height and advertised endpoints
+	// Build response with maximum height and advertised endpoints.
 	cfg := h.configLoader.Get()
 	resp := StatusResponse{
 		Height: maxHeight,
 	}
 
-	// Find the network config to get advertised endpoints
 	networkConfig := cfg.FindNetwork(network)
-
-	// Add advertised endpoints based on enabled types
 	if networkConfig != nil {
-		for _, endpointType := range enabledTypes {
-			if ep := networkConfig.FindEndpoint(endpointType); ep != nil && ep.Advertise != "" {
-				switch endpointType {
-				case "api", "rest":
-					resp.API = ep.Advertise
-				case "rpc":
-					resp.RPC = ep.Advertise
-				case "grpc":
-					resp.GRPC = ep.Advertise
-				}
+		endpoints := make(map[string]string)
+		for _, protocol := range enabledTypes {
+			if ep := networkConfig.FindEndpoint(protocol); ep != nil && ep.Advertise != "" {
+				endpoints[protocol] = ep.Advertise
 			}
+		}
+		if len(endpoints) > 0 {
+			resp.Endpoints = endpoints
 		}
 	}
 
@@ -223,9 +216,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		zap.String("request_id", getRequestID(r)),
 		zap.String("network", network),
 		zap.Int64("height", resp.Height),
-		zap.String("api", resp.API),
-		zap.String("rpc", resp.RPC),
-		zap.String("grpc", resp.GRPC),
+		zap.Any("endpoints", resp.Endpoints),
 	)
 }
 

@@ -288,11 +288,11 @@ func TestAuth_PerNetworkPermissions_RestOnly(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if resp.API == "" {
-		t.Error("expected API (rest) endpoint in response, got empty")
+	if resp.Endpoints["rest"] == "" {
+		t.Error("expected rest endpoint in response, got empty")
 	}
-	if resp.RPC != "" {
-		t.Errorf("expected no RPC endpoint for rest-only user, got %q", resp.RPC)
+	if resp.Endpoints["rpc"] != "" {
+		t.Errorf("expected no rpc endpoint for rest-only user, got %q", resp.Endpoints["rpc"])
 	}
 }
 
@@ -356,10 +356,10 @@ func TestAuth_PerNetworkPermissions_AdminSeesAll(t *testing.T) {
 	}
 
 	// Admin should see both rest and rpc endpoints.
-	if resp.API == "" {
-		t.Error("expected API (rest) endpoint for admin")
+	if resp.Endpoints["rest"] == "" {
+		t.Error("expected rest endpoint for admin")
 	}
-	if resp.RPC == "" {
-		t.Error("expected RPC endpoint for admin")
+	if resp.Endpoints["rpc"] == "" {
+		t.Error("expected rpc endpoint for admin")
 	}
 }

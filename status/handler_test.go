@@ -150,6 +150,14 @@ func TestStatus_ReturnsHeight(t *testing.T) {
 	if resp.Height != 12345 {
 		t.Errorf("expected height 12345, got %d", resp.Height)
 	}
+
+	// V2: endpoints map should contain the advertised URL for "rest".
+	if resp.Endpoints == nil {
+		t.Fatal("expected endpoints map, got nil")
+	}
+	if resp.Endpoints["rest"] != "https://api.pocket.example.com" {
+		t.Errorf("expected rest endpoint, got %q", resp.Endpoints["rest"])
+	}
 }
 
 func TestStatus_UnknownNetwork(t *testing.T) {
