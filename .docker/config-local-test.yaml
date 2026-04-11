@@ -1,5 +1,4 @@
-# Multi-chain local test config
-# Cosmos (beta-lego), EVM (Ethereum mainnet), Solana (mainnet), Custom (Bitcoin via mempool.space)
+# Full feature test: archival, sync filter, round-robin, multi-chain
 listen: ":3000"
 auth: false
 
@@ -12,15 +11,16 @@ grpc_keepalive:
   timeout: 20s
 
 rate_limit:
-  enabled: false
+  enabled: true
+  requests_per_second: 50
+  burst: 100
+  trust_proxy: false
 
 redis:
   enabled: false
 
-# ─── Networks ────────────────────────────────────────────────────────────────
-
 networks:
-  # Cosmos — Pocket beta-lego testnet
+  # Cosmos — Pocket beta-lego (3 nodes, round-robin)
   - name: pocket-beta
     type: cosmos
     height_check:
@@ -29,33 +29,38 @@ networks:
     endpoints:
       - protocol: rest
         listen: ":8080"
-        advertise: "http://localhost:8080"
       - protocol: rpc
         listen: ":8081"
-        advertise: "http://localhost:8081"
 
-  # EVM — Ethereum mainnet via PublicNode
-  - name: ethereum
+  # EVM — Optimism with ARCHIVAL filter + SYNC filter
+  - name: optimism
     type: evm
     mode: latest
     height_check:
-      interval: 12s
+      interval: 10s
     endpoints:
       - protocol: jsonrpc
         listen: ":9080"
-        advertise: "http://localhost:9080"
+    archival:
+      min_height: 1
+      check_interval: 5m
+    sync:
+      max_drift: 5
+      check_interval: 30s
+      oracles:
+        - url: "https://mainnet.optimism.io"
 
-  # Solana — mainnet-beta
-  - name: solana
-    type: solana
+  # EVM — BSC (2 nodes, round-robin)
+  - name: bsc
+    type: evm
+    mode: latest
     height_check:
       interval: 5s
     endpoints:
       - protocol: jsonrpc
-        listen: ":9181"
-        advertise: "http://localhost:9181"
+        listen: ":9081"
 
-  # Custom — Bitcoin block height via mempool.space REST API
+  # Custom — Bitcoin
   - name: bitcoin
     type: custom
     height_check:
@@ -67,37 +72,49 @@ networks:
     endpoints:
       - protocol: http
         listen: ":9280"
-        advertise: "http://localhost:9280"
-
-# ─── Internal Nodes ──────────────────────────────────────────────────────────
 
 internals:
-  # Cosmos nodes
+  # Cosmos — 3 nodes
   - name: validator-one
     network: pocket-beta
     endpoints:
       rest: "https://api-validator-one-lego.beta.infra.pocket.network"
       rpc: "https://rpc-validator-one-lego.beta.infra.pocket.network"
-
+  - name: validator-two
+    network: pocket-beta
+    endpoints:
+      rest: "https://api-validator-two-lego.beta.infra.pocket.network"
+      rpc: "https://rpc-validator-two-lego.beta.infra.pocket.network"
   - name: seed-one
     network: pocket-beta
     endpoints:
       rest: "https://api-seed-one-lego.beta.infra.pocket.network"
       rpc: "https://rpc-seed-one-lego.beta.infra.pocket.network"
 
-  # EVM node
-  - name: eth-publicnode
-    network: ethereum
+  # Optimism — two public nodes for archival testing
+  # mainnet.optimism.io is archival (has block 1)
+  # op.api.pocket.network is pruned (no block 1)
+  - name: op-archival
+    network: optimism
     endpoints:
-      jsonrpc: "https://ethereum-rpc.publicnode.com"
+      jsonrpc: "https://mainnet.optimism.io"
 
-  # Solana node
-  - name: sol-mainnet
-    network: solana
+  - name: op-pruned
+    network: optimism
     endpoints:
-      jsonrpc: "https://api.mainnet-beta.solana.com"
+      jsonrpc: "https://op.api.pocket.network"
 
-  # Bitcoin (custom) node
+  # BSC — 2 nodes for round-robin
+  - name: bsc-pocket
+    network: bsc
+    endpoints:
+      jsonrpc: "https://bsc.api.pocket.network"
+  - name: bsc-publicnode
+    network: bsc
+    endpoints:
+      jsonrpc: "https://bsc-rpc.publicnode.com"
+
+  # Bitcoin
   - name: btc-mempool
     network: bitcoin
     endpoints:

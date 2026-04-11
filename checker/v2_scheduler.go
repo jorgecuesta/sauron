@@ -34,6 +34,7 @@ type MultiChainScheduler struct {
 	endpointStore *storage.ExternalEndpointStore
 	extChecker    *ExternalChecker
 	oracleChecker *OracleChecker
+	archivalStore *storage.ArchivalStore
 	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
 	timeout       time.Duration
@@ -45,6 +46,7 @@ func NewMultiChainScheduler(
 	registry *adapter.Registry,
 	heightStore *storage.HeightStore,
 	healthStore *storage.HealthStore,
+	archivalStore *storage.ArchivalStore,
 	cache *storage.Cache,
 	endpointStore *storage.ExternalEndpointStore,
 	oracleChecker *OracleChecker,
@@ -68,6 +70,7 @@ func NewMultiChainScheduler(
 		endpointStore: endpointStore,
 		extChecker:    extChecker,
 		oracleChecker: oracleChecker,
+		archivalStore: archivalStore,
 		configLoader:  configLoader,
 		logger:        logger,
 		timeout:       5 * time.Second,
@@ -117,6 +120,17 @@ func (s *MultiChainScheduler) Start() error {
 		s.logger.Info("Oracle checker scheduled",
 			zap.Strings("networks", s.oracleChecker.Networks()),
 		)
+	}
+
+	// Schedule archival checks every 30 seconds for networks with archival config.
+	if s.archivalStore != nil && s.hasArchivalNetworks() {
+		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
+			s.checkArchivalStatus()
+		})
+		if err != nil {
+			return fmt.Errorf("multi-chain scheduler: failed to add archival check cron: %w", err)
+		}
+		s.logger.Info("Archival checker scheduled")
 	}
 
 	s.cron.Start()
@@ -402,6 +416,100 @@ func (s *MultiChainScheduler) recoverFailedEndpoints() {
 
 	s.extChecker.RecoverFailedEndpoints(ctx)
 	s.extChecker.UpdateEndpointMetrics()
+}
+
+// hasArchivalNetworks returns true if any network has archival config.
+func (s *MultiChainScheduler) hasArchivalNetworks() bool {
+	cfg := s.configLoader.Get()
+	for _, net := range cfg.Networks {
+		if net.Archival != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkArchivalStatus checks if nodes have historical block data at the configured min_height.
+// For EVM chains: uses eth_getBlockByNumber(min_height).
+// For Cosmos chains: uses /blocks/{min_height} on REST.
+// For custom: uses the same height check config with the min_height substituted.
+func (s *MultiChainScheduler) checkArchivalStatus() {
+	cfg := s.configLoader.Get()
+
+	for _, network := range cfg.Networks {
+		if network.Archival == nil {
+			continue
+		}
+
+		minHeight := network.Archival.MinHeight
+		checkCfg := s.buildArchivalCheckConfig(&network, minHeight)
+		if checkCfg == nil {
+			continue
+		}
+
+		for _, node := range cfg.Internals {
+			if node.Network != network.Name {
+				continue
+			}
+
+			// Get the node URL for the archival check protocol.
+			nodeURL := node.Endpoints[checkCfg.Protocol]
+			if nodeURL == "" {
+				continue
+			}
+
+			node := node
+			checkCfg := *checkCfg
+			_ = s.pool.Go(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+				defer cancel()
+
+				height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
+				if err != nil || height <= 0 {
+					s.archivalStore.SetNotArchival(network.Name, node.Name)
+					s.logger.Info("Node is not archival",
+						zap.String("node", node.Name),
+						zap.String("network", network.Name),
+						zap.Int64("min_height", minHeight),
+						zap.Error(err),
+					)
+					return
+				}
+
+				s.archivalStore.SetArchival(network.Name, node.Name)
+				s.logger.Info("Node confirmed archival",
+					zap.String("node", node.Name),
+					zap.String("network", network.Name),
+					zap.Int64("min_height", minHeight),
+					zap.Int64("returned_height", height),
+				)
+			})
+		}
+	}
+}
+
+// buildArchivalCheckConfig uses the adapter interface to produce the archival check config.
+func (s *MultiChainScheduler) buildArchivalCheckConfig(network *config.MultiChainNetwork, minHeight int64) *adapter.CheckConfig {
+	adpt, err := s.registry.Get(network.Type)
+	if err != nil {
+		s.logger.Warn("No adapter for archival check",
+			zap.String("network", network.Name),
+			zap.String("type", network.Type),
+			zap.Error(err),
+		)
+		return nil
+	}
+
+	netCfg := V2NetworkToAdapterConfig(network)
+	cfg, err := adpt.ArchivalCheck(netCfg, minHeight)
+	if err != nil {
+		s.logger.Warn("Failed to build archival check config",
+			zap.String("network", network.Name),
+			zap.Error(err),
+		)
+		return nil
+	}
+	return &cfg
 }
 
 // V2NetworkToAdapterConfig converts a V2 MultiChainNetwork to the adapter's NetworkConfig.

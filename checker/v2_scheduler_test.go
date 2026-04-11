@@ -62,7 +62,7 @@ internals:
 	// Use a synchronous pool (size 1) for test determinism.
 	pool := newTestPool()
 
-	sched := NewMultiChainScheduler(engine, registry, heightStore, healthStore, cache, endpointStore, nil, loader, pool, zap.NewNop())
+	sched := NewMultiChainScheduler(engine, registry, heightStore, healthStore, nil, cache, endpointStore, nil, loader, pool, zap.NewNop())
 
 	return sched, heightStore, healthStore
 }

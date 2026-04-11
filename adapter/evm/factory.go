@@ -48,6 +48,22 @@ func (f *Factory) HeightCheck(net adapter.NetworkConfig) (adapter.CheckConfig, e
 	}, nil
 }
 
+// ArchivalCheck returns a config that queries a specific historical block by number.
+// Uses eth_getBlockByNumber with the hex-encoded minHeight. If the result is non-null,
+// the node has archival data at that height.
+func (f *Factory) ArchivalCheck(net adapter.NetworkConfig, minHeight int64) (adapter.CheckConfig, error) {
+	hexHeight := fmt.Sprintf("0x%x", minHeight)
+	return adapter.CheckConfig{
+		Method:         "POST",
+		URLPath:        "/",
+		Headers:        http.Header{"Content-Type": {"application/json"}},
+		Body:           []byte(fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["%s",false],"id":1}`, hexHeight)),
+		ResponsePath:   ".result.number",
+		ResponseFormat: "hex",
+		Protocol:       "jsonrpc",
+	}, nil
+}
+
 // HealthChecks returns health check configs for each protocol endpoint a node exposes.
 func (f *Factory) HealthChecks(net adapter.NetworkConfig, node adapter.NodeConfig) ([]adapter.HealthCheckConfig, error) {
 	var checks []adapter.HealthCheckConfig

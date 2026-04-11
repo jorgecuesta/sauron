@@ -65,6 +65,13 @@ func (f *Factory) HeightCheck(net adapter.NetworkConfig) (adapter.CheckConfig, e
 	}, nil
 }
 
+// ArchivalCheck for custom type reuses the height check config.
+// The assumption is: if the custom endpoint can respond at all, it's archival.
+// Operators with custom archival logic should use a height check that queries historical data.
+func (f *Factory) ArchivalCheck(net adapter.NetworkConfig, minHeight int64) (adapter.CheckConfig, error) {
+	return f.HeightCheck(net)
+}
+
 // HealthChecks returns a basic HTTP health check for each endpoint.
 // Custom nodes get a simple GET/POST liveness check — the operator's
 // height check URL is used as the health check path too.

@@ -86,6 +86,21 @@ func (f *Factory) HealthChecks(net adapter.NetworkConfig, node adapter.NodeConfi
 	return checks, nil
 }
 
+// ArchivalCheck returns a config that queries a specific historical slot/block.
+// Uses getBlock(slot) — if the node has the block, it returns data.
+func (f *Factory) ArchivalCheck(net adapter.NetworkConfig, minHeight int64) (adapter.CheckConfig, error) {
+	commitment := resolveCommitment(net)
+	return adapter.CheckConfig{
+		Method:         "POST",
+		URLPath:        "/",
+		Headers:        http.Header{"Content-Type": {"application/json"}},
+		Body:           []byte(fmt.Sprintf(`{"jsonrpc":"2.0","method":"getBlock","params":[%d,{"encoding":"json","transactionDetails":"none","rewards":false,"commitment":"%s"}],"id":1}`, minHeight, commitment)),
+		ResponsePath:   ".result.blockHeight",
+		ResponseFormat: "integer",
+		Protocol:       "jsonrpc",
+	}, nil
+}
+
 // resolveCommitment returns the Solana commitment level, defaulting to "finalized".
 func resolveCommitment(net adapter.NetworkConfig) string {
 	if net.Mode != "" {

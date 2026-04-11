@@ -152,7 +152,7 @@ func New(configPath string) (*Server, error) {
 	}
 
 	// Initialize scheduler with V2 config.
-	sched := checker.NewMultiChainScheduler(engine, registry, store, healthStore, cache, endpointStore, oracleChecker, configLoader, pool, logger)
+	sched := checker.NewMultiChainScheduler(engine, registry, store, healthStore, archivalStore, cache, endpointStore, oracleChecker, configLoader, pool, logger)
 
 	logger.Info("The Dark Lord's judgment ready",
 		zap.Int("networks", len(cfg.Networks)),

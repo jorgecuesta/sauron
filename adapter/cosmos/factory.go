@@ -96,6 +96,18 @@ func (f *Factory) HealthChecks(net adapter.NetworkConfig, node adapter.NodeConfi
 	return checks, nil
 }
 
+// ArchivalCheck returns a config that queries a specific historical block by height.
+// Uses the REST endpoint: /cosmos/base/tendermint/v1beta1/blocks/{height}
+func (f *Factory) ArchivalCheck(net adapter.NetworkConfig, minHeight int64) (adapter.CheckConfig, error) {
+	return adapter.CheckConfig{
+		Method:         "GET",
+		URLPath:        fmt.Sprintf("/cosmos/base/tendermint/v1beta1/blocks/%d", minHeight),
+		ResponsePath:   ".sdk_block.header.height",
+		ResponseFormat: "string",
+		Protocol:       "rest",
+	}, nil
+}
+
 // heightCheckProtocol determines which protocol to use for height checks.
 // Uses the network config's HeightCheck.Protocol if set, defaults to "rpc".
 func heightCheckProtocol(net adapter.NetworkConfig) string {

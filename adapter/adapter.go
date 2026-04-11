@@ -19,6 +19,11 @@ type ChainAdapter interface {
 	// HealthChecks returns configs for per-endpoint liveness checks.
 	// One per protocol endpoint that the node exposes.
 	HealthChecks(net NetworkConfig, node NodeConfig) ([]HealthCheckConfig, error)
+
+	// ArchivalCheck returns the config for verifying a node has historical data
+	// at the given block height. The engine executes this config — if it returns
+	// a valid height, the node is considered archival.
+	ArchivalCheck(net NetworkConfig, minHeight int64) (CheckConfig, error)
 }
 
 // NetworkConfig is the subset of network configuration that adapters need.

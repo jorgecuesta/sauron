@@ -16,6 +16,9 @@ func (s *stubAdapter) HeightCheck(_ NetworkConfig) (CheckConfig, error) {
 func (s *stubAdapter) HealthChecks(_ NetworkConfig, _ NodeConfig) ([]HealthCheckConfig, error) {
 	return nil, nil
 }
+func (s *stubAdapter) ArchivalCheck(_ NetworkConfig, _ int64) (CheckConfig, error) {
+	return CheckConfig{Protocol: "rpc"}, nil
+}
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
 	t.Parallel()
