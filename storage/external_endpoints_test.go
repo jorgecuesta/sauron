@@ -142,6 +142,65 @@ func TestExternalEndpoints_FiltersNetwork(t *testing.T) {
 	}
 }
 
+// TestUpdateWebSocketAvailability_SetsTrue verifies that UpdateWebSocketAvailability
+// sets WebSocketAvailable=true on an existing endpoint.
+func TestUpdateWebSocketAvailability_SetsTrue(t *testing.T) {
+	t.Parallel()
+	s := newTestEndpointStore()
+
+	s.StoreAdvertised("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com")
+	s.MarkValidated("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com", 1000, 5*time.Millisecond)
+
+	s.UpdateWebSocketAvailability("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com", true)
+
+	eps := s.GetValidatedEndpoints("pocket", "rpc")
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 validated rpc endpoint, got %d", len(eps))
+	}
+	if !eps[0].WebSocketAvailable {
+		t.Error("expected WebSocketAvailable=true after UpdateWebSocketAvailability(true)")
+	}
+}
+
+// TestUpdateWebSocketAvailability_SetsFalse verifies that UpdateWebSocketAvailability
+// sets WebSocketAvailable=false on an existing endpoint.
+func TestUpdateWebSocketAvailability_SetsFalse(t *testing.T) {
+	t.Parallel()
+	s := newTestEndpointStore()
+
+	s.StoreAdvertised("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com")
+	s.MarkValidated("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com", 1000, 5*time.Millisecond)
+
+	// Set true first, then set false.
+	s.UpdateWebSocketAvailability("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com", true)
+	s.UpdateWebSocketAvailability("ext-1", "https://ring.example.com", "pocket", "rpc", "https://rpc.example.com", false)
+
+	eps := s.GetValidatedEndpoints("pocket", "rpc")
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 validated rpc endpoint, got %d", len(eps))
+	}
+	if eps[0].WebSocketAvailable {
+		t.Error("expected WebSocketAvailable=false after UpdateWebSocketAvailability(false)")
+	}
+}
+
+// TestUpdateWebSocketAvailability_NonExistentEndpoint verifies that
+// UpdateWebSocketAvailability is a no-op when the endpoint does not exist
+// (should not panic or create a new entry).
+func TestUpdateWebSocketAvailability_NonExistentEndpoint(t *testing.T) {
+	t.Parallel()
+	s := newTestEndpointStore()
+
+	// Call on an endpoint that was never stored — must not panic.
+	s.UpdateWebSocketAvailability("nonexistent", "https://ring.example.com", "pocket", "rpc", "https://unknown.example.com", true)
+
+	// No entries should have been created.
+	eps := s.GetValidatedEndpoints("pocket", "rpc")
+	if len(eps) != 0 {
+		t.Errorf("expected 0 endpoints after no-op call, got %d", len(eps))
+	}
+}
+
 func TestExternalEndpoints_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 	s := newTestEndpointStore()

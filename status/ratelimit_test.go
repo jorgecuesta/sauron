@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 )
 
 // TestNewRateLimiter_Creates verifies that NewRateLimiter returns a non-nil limiter
@@ -383,5 +386,135 @@ func TestAllow_CreatesLimiterEntry(t *testing.T) {
 
 	if afterLen != initialLen+1 {
 		t.Errorf("expected limiters map to grow by 1, had %d now %d", initialLen, afterLen)
+	}
+}
+
+// TestCleanup_RetainsActiveEntry verifies that cleanup() does NOT remove a limiter
+// that still has fewer tokens than burst (meaning it was recently used).
+func TestCleanup_RetainsActiveEntry(t *testing.T) {
+	t.Parallel()
+	// burst=5: consume one token so the limiter has 4 tokens (< burst), which cleanup keeps.
+	rl := NewRateLimiter(10, 5, false)
+	defer rl.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "77.77.77.77:1234"
+	rl.Allow(req) // consumes 1 token; remaining = 4 < burst(5)
+
+	rl.cleanup()
+
+	rl.mu.RLock()
+	_, exists := rl.limiters["77.77.77.77"]
+	rl.mu.RUnlock()
+
+	if !exists {
+		t.Error("expected limiter to be retained after one Allow (tokens < burst)")
+	}
+}
+
+// TestCleanup_RemovesIdleEntry verifies that a limiter at full burst capacity
+// (i.e. never used since it was created, or fully refilled) is removed by cleanup().
+// We simulate this by injecting a fresh limiter directly into the map, which starts
+// at burst capacity by definition of rate.NewLimiter.
+func TestCleanup_RemovesIdleEntry(t *testing.T) {
+	t.Parallel()
+	// burst=3: a freshly-created limiter has Tokens()==3==burst, so cleanup removes it.
+	rl := NewRateLimiter(10, 3, false)
+	defer rl.Stop()
+
+	// Inject a fresh limiter directly (simulating an idle IP that was tracked but
+	// never consumed any tokens since the last cleanup cycle).
+	rl.mu.Lock()
+	rl.limiters["idle.ip"] = rate.NewLimiter(rate.Limit(10), 3)
+	rl.mu.Unlock()
+
+	// Confirm the entry exists before cleanup.
+	rl.mu.RLock()
+	_, exists := rl.limiters["idle.ip"]
+	rl.mu.RUnlock()
+	if !exists {
+		t.Fatal("setup: expected idle.ip entry to be injected")
+	}
+
+	rl.cleanup()
+
+	rl.mu.RLock()
+	_, stillExists := rl.limiters["idle.ip"]
+	rl.mu.RUnlock()
+
+	if stillExists {
+		t.Error("expected idle entry (tokens==burst) to be removed by cleanup()")
+	}
+}
+
+// TestRateLimitMiddleware_Returns429WhenExhausted verifies that the middleware
+// returns HTTP 429 once the burst is exhausted.
+func TestRateLimitMiddleware_Returns429WhenExhausted(t *testing.T) {
+	t.Parallel()
+
+	// Create the rate limiter directly with burst=2 so it exhausts quickly.
+	rl := NewRateLimiter(1, 2, false)
+	defer rl.Stop()
+
+	h := &Handler{
+		rateLimiter: rl,
+		logger:      zap.NewNop(),
+	}
+
+	// Inner handler always returns 200.
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	middleware := h.rateLimitMiddleware(inner)
+
+	allowed := 0
+	denied := 0
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/pocket/status", nil)
+		req.RemoteAddr = "10.0.0.1:1234"
+		w := httptest.NewRecorder()
+		middleware.ServeHTTP(w, req)
+		switch w.Code {
+		case http.StatusOK:
+			allowed++
+		case http.StatusTooManyRequests:
+			denied++
+		}
+	}
+
+	if allowed == 0 {
+		t.Error("expected at least one request to be allowed before burst was exhausted")
+	}
+	if denied == 0 {
+		t.Error("expected at least one request to be denied (429) once burst was exhausted")
+	}
+}
+
+// TestRateLimitMiddleware_AllowsWhenUnderLimit verifies that requests within burst
+// all receive 200 OK.
+func TestRateLimitMiddleware_AllowsWhenUnderLimit(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(100, 100, false)
+	defer rl.Stop()
+
+	h := &Handler{
+		rateLimiter: rl,
+		logger:      zap.NewNop(),
+	}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	middleware := h.rateLimitMiddleware(inner)
+
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.1.2.3:5678"
+		w := httptest.NewRecorder()
+		middleware.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d", i+1, w.Code)
+		}
 	}
 }

@@ -17,6 +17,57 @@ import (
 	"google.golang.org/grpc"
 )
 
+// testMultiChainSetupWithArchival creates a scheduler that has an archival
+// network configured, pointing nodes at nodeURL.
+func testMultiChainSetupWithArchival(t *testing.T, nodeURL string) (*MultiChainScheduler, *storage.ArchivalStore) {
+	t.Helper()
+
+	heightStore := storage.NewHeightStore()
+	healthStore := storage.NewHealthStore()
+	archivalStore := storage.NewArchivalStore()
+	cache := storage.NewCache("", zap.NewNop())
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+
+	registry := adapter.NewRegistry()
+	if err := registry.Register(cosmos.New()); err != nil {
+		t.Fatalf("register cosmos: %v", err)
+	}
+
+	engine := adapter.NewEngine(&http.Client{Timeout: 2 * time.Second})
+
+	cfgYAML := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":18080"
+      - protocol: rpc
+        listen: ":18081"
+    archival:
+      min_height: 1
+      check_interval: 30s
+internals:
+  - name: seed-one
+    network: pocket
+    endpoints:
+      rest: "` + nodeURL + `"
+      rpc: "` + nodeURL + `"
+`
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+	pool := newTestPool()
+
+	sched := NewMultiChainScheduler(engine, registry, heightStore, healthStore, archivalStore, cache, endpointStore, nil, loader, pool, zap.NewNop())
+	return sched, archivalStore
+}
+
 // testMultiChainSetup creates all dependencies for MultiChainScheduler tests.
 func testMultiChainSetup(t *testing.T, nodeURL string) (*MultiChainScheduler, *storage.HeightStore, *storage.HealthStore) {
 	t.Helper()
@@ -520,5 +571,363 @@ func TestScheduleWebSocketHealthCheck_Unhealthy(t *testing.T) {
 	}
 	if h.LastError == "" {
 		t.Fatal("expected LastError to be set")
+	}
+}
+
+// TestHasArchivalNetworks_True verifies that hasArchivalNetworks returns true
+// when at least one network has an archival config.
+func TestHasArchivalNetworks_True(t *testing.T) {
+	t.Parallel()
+
+	cfgYAML := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+    archival:
+      min_height: 1000
+      check_interval: 30s
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "http://localhost:1317"
+`
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+	sched := &MultiChainScheduler{
+		configLoader: loader,
+		logger:       zap.NewNop(),
+	}
+
+	if !sched.hasArchivalNetworks() {
+		t.Fatal("expected hasArchivalNetworks to return true when archival is configured")
+	}
+}
+
+// TestHasArchivalNetworks_False verifies that hasArchivalNetworks returns false
+// when no network has an archival config.
+func TestHasArchivalNetworks_False(t *testing.T) {
+	t.Parallel()
+
+	cfgYAML := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "http://localhost:1317"
+`
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+	sched := &MultiChainScheduler{
+		configLoader: loader,
+		logger:       zap.NewNop(),
+	}
+
+	if sched.hasArchivalNetworks() {
+		t.Fatal("expected hasArchivalNetworks to return false when no archival is configured")
+	}
+}
+
+// TestHasArchivalNetworks_MultipleNetworks_OnlyOneArchival verifies that
+// hasArchivalNetworks returns true even when only one of multiple networks has archival.
+func TestHasArchivalNetworks_MultipleNetworks_OnlyOneArchival(t *testing.T) {
+	t.Parallel()
+
+	cfgYAML := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+  - name: pocket-beta
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8081"
+    archival:
+      min_height: 500
+      check_interval: 30s
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "http://localhost:1317"
+  - name: node-2
+    network: pocket-beta
+    endpoints:
+      rest: "http://localhost:1318"
+`
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+	sched := &MultiChainScheduler{
+		configLoader: loader,
+		logger:       zap.NewNop(),
+	}
+
+	if !sched.hasArchivalNetworks() {
+		t.Fatal("expected hasArchivalNetworks to return true when at least one network has archival")
+	}
+}
+
+// TestCheckExternalRings_SendsRequestToMockRing verifies that checkExternalRings
+// calls the external ring at /{network}/status.
+func TestCheckExternalRings_SendsRequestToMockRing(t *testing.T) {
+	t.Parallel()
+
+	// Track incoming requests.
+	receivedPaths := make(chan string, 10)
+
+	// Mock ring server — responds with a valid status JSON.
+	mockRing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPaths <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return a valid ExternalStatusResponse so queryRing doesn't fail.
+		_, _ = w.Write([]byte(`{"height":12345,"endpoints":{}}`))
+	}))
+	defer mockRing.Close()
+
+	cfgYAML := `
+listen: ":3000"
+timeouts:
+  health_check: 2s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+externals:
+  - name: ext-ring
+    rings:
+      - "` + mockRing.URL + `"
+internals:
+  - name: node-1
+    network: pocket
+    endpoints:
+      rest: "http://localhost:1317"
+`
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+
+	heightStore := storage.NewHeightStore()
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+
+	registry := adapter.NewRegistry()
+	if err := registry.Register(cosmos.New()); err != nil {
+		t.Fatalf("register cosmos: %v", err)
+	}
+	engine := adapter.NewEngine(&http.Client{Timeout: 2 * time.Second})
+	pool := newTestPool()
+
+	sched := NewMultiChainScheduler(engine, registry, heightStore, storage.NewHealthStore(), nil,
+		storage.NewCache("", zap.NewNop()), endpointStore, nil, loader, pool, zap.NewNop())
+
+	sched.checkExternalRings()
+	drainTestPool(sched.pool)
+
+	// Verify the mock ring received a request at /pocket/status.
+	select {
+	case path := <-receivedPaths:
+		if path != "/pocket/status" {
+			t.Errorf("expected request to /pocket/status, got %q", path)
+		}
+	default:
+		t.Fatal("expected mock ring to receive a request, but it received none")
+	}
+}
+
+// TestRecoverFailedEndpoints_RecoversThenWorking verifies that recoverFailedEndpoints
+// re-validates a failed endpoint when the backend now responds OK.
+func TestRecoverFailedEndpoints_RecoversThenWorking(t *testing.T) {
+	t.Parallel()
+
+	// Mock server that now responds OK (simulating recovery).
+	recovered := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer recovered.Close()
+
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+
+	// Seed a failed endpoint that points to the now-recovered server.
+	endpointStore.StoreAdvertised("ext-1", "https://ring.example.com", "pocket", "rest", recovered.URL)
+	// Mark validated then immediately fail it (simulates 3 proxy errors).
+	endpointStore.MarkValidated("ext-1", "https://ring.example.com", "pocket", "rest", recovered.URL, 100, 10*time.Millisecond)
+	endpointStore.TrackProxyError("pocket", "rest", recovered.URL)
+	endpointStore.TrackProxyError("pocket", "rest", recovered.URL)
+	endpointStore.TrackProxyError("pocket", "rest", recovered.URL)
+
+	// Confirm the endpoint is in the failed state.
+	failed := endpointStore.GetFailedEndpoints()
+	if len(failed) != 1 {
+		t.Fatalf("setup: expected 1 failed endpoint, got %d", len(failed))
+	}
+
+	cfgYAML := testutil.MinimalV2YAML
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+
+	registry := adapter.NewRegistry()
+	if err := registry.Register(cosmos.New()); err != nil {
+		t.Fatalf("register cosmos: %v", err)
+	}
+	engine := adapter.NewEngine(&http.Client{Timeout: 2 * time.Second})
+	pool := newTestPool()
+
+	sched := NewMultiChainScheduler(engine, registry, storage.NewHeightStore(), storage.NewHealthStore(), nil,
+		storage.NewCache("", zap.NewNop()), endpointStore, nil, loader, pool, zap.NewNop())
+
+	sched.recoverFailedEndpoints()
+
+	// After recovery, the endpoint should be validated and working.
+	working := endpointStore.GetValidatedEndpoints("pocket", "rest")
+	if len(working) != 1 {
+		t.Fatalf("expected endpoint to be recovered and working, got %d validated endpoints", len(working))
+	}
+	if !working[0].IsWorking {
+		t.Error("expected recovered endpoint to be working")
+	}
+}
+
+// TestBuildArchivalCheckConfig_Cosmos verifies that buildArchivalCheckConfig
+// returns a valid CheckConfig for a Cosmos network.
+func TestBuildArchivalCheckConfig_Cosmos(t *testing.T) {
+	t.Parallel()
+
+	registry := adapter.NewRegistry()
+	if err := registry.Register(cosmos.New()); err != nil {
+		t.Fatalf("register cosmos: %v", err)
+	}
+
+	cfgYAML := testutil.MinimalV2YAML
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+
+	sched := &MultiChainScheduler{
+		registry:     registry,
+		configLoader: loader,
+		logger:       zap.NewNop(),
+	}
+
+	network := &config.MultiChainNetwork{
+		Name: "pocket",
+		Type: "cosmos",
+		Endpoints: []config.NetworkEndpoint{
+			{Protocol: "rest", Listen: ":8080"},
+		},
+	}
+
+	cfg := sched.buildArchivalCheckConfig(network, 1000)
+	if cfg == nil {
+		t.Fatal("expected non-nil CheckConfig for cosmos archival check")
+	}
+	if cfg.Protocol != "rest" {
+		t.Errorf("expected Protocol=rest, got %q", cfg.Protocol)
+	}
+	// The cosmos adapter uses /cosmos/base/tendermint/v1beta1/blocks/{height}
+	if cfg.URLPath == "" {
+		t.Error("expected non-empty URLPath")
+	}
+	if cfg.ResponsePath == "" {
+		t.Error("expected non-empty ResponsePath")
+	}
+}
+
+// TestBuildArchivalCheckConfig_UnknownType verifies that buildArchivalCheckConfig
+// returns nil when no adapter exists for the given network type.
+func TestBuildArchivalCheckConfig_UnknownType(t *testing.T) {
+	t.Parallel()
+
+	registry := adapter.NewRegistry()
+	// Register only cosmos — no "unknownchain" adapter.
+	if err := registry.Register(cosmos.New()); err != nil {
+		t.Fatalf("register cosmos: %v", err)
+	}
+
+	cfgYAML := testutil.MinimalV2YAML
+	loader := testutil.NewMultiChainLoader(t, cfgYAML)
+
+	sched := &MultiChainScheduler{
+		registry:     registry,
+		configLoader: loader,
+		logger:       zap.NewNop(),
+	}
+
+	network := &config.MultiChainNetwork{
+		Name: "unknownnet",
+		Type: "unknownchain",
+	}
+
+	cfg := sched.buildArchivalCheckConfig(network, 1000)
+	if cfg != nil {
+		t.Errorf("expected nil CheckConfig for unknown adapter type, got %+v", cfg)
+	}
+}
+
+// TestCheckArchivalStatus_NodeMarkedArchival verifies that checkArchivalStatus
+// marks a node as archival when the backend returns a valid block at min_height.
+func TestCheckArchivalStatus_NodeMarkedArchival(t *testing.T) {
+	t.Parallel()
+
+	// Mock backend that returns a valid block response for the archival height check.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Cosmos archival check uses /cosmos/base/tendermint/v1beta1/blocks/{height}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"sdk_block":{"header":{"height":"1"}}}`))
+	}))
+	defer srv.Close()
+
+	sched, archivalStore := testMultiChainSetupWithArchival(t, srv.URL)
+
+	sched.checkArchivalStatus()
+	drainTestPool(sched.pool)
+
+	if !archivalStore.IsArchival("pocket", "seed-one") {
+		t.Fatal("expected seed-one to be marked archival after successful block retrieval")
+	}
+}
+
+// TestCheckArchivalStatus_NodeMarkedNotArchival verifies that checkArchivalStatus
+// marks a node as non-archival when the backend returns an error.
+func TestCheckArchivalStatus_NodeMarkedNotArchival(t *testing.T) {
+	t.Parallel()
+
+	// Mock backend that returns 404 (historical block not available).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"block not found"}`))
+	}))
+	defer srv.Close()
+
+	sched, archivalStore := testMultiChainSetupWithArchival(t, srv.URL)
+
+	sched.checkArchivalStatus()
+	drainTestPool(sched.pool)
+
+	status := archivalStore.GetStatus("pocket", "seed-one")
+	if status == nil {
+		t.Fatal("expected archival status entry to exist for seed-one")
+	}
+	if status.IsArchival {
+		t.Fatal("expected seed-one to be marked NOT archival after 404 response")
 	}
 }
