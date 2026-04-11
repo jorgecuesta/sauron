@@ -30,26 +30,27 @@ import (
 // Server orchestrates all components of Sauron
 // The foundation of Barad-dûr
 type Server struct {
-	configLoader  *config.MultiChainLoader
-	logger        *zap.Logger
-	pool          pond.Pool
-	scheduler     *checker.MultiChainScheduler
-	store         *storage.HeightStore
-	healthStore   *storage.HealthStore   // per-node per-protocol health
-	archivalStore *storage.ArchivalStore // archival node tracking
-	oracleStore   *storage.OracleStore   // oracle reference heights
-	cache         *storage.Cache
-	endpointStore *storage.ExternalEndpointStore
-	selector      *selector.Selector
-	registry      *adapter.Registry      // adapter registry
-	engine        *adapter.Engine        // check engine
-	oracleChecker *checker.OracleChecker // oracle height checker
-	statusServer  *http.Server
-	statusHandler *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
-	httpServers   []*http.Server     // All HTTP proxy servers
-	grpcServers   []*grpc.Server     // All gRPC proxy servers
-	grpcProxies   []*proxy.GRPCProxy // All gRPC proxy instances (for Close)
-	errCh         chan error         // Fatal errors from background goroutines
+	configLoader   *config.MultiChainLoader
+	logger         *zap.Logger
+	pool           pond.Pool
+	scheduler      *checker.MultiChainScheduler
+	store          *storage.HeightStore
+	healthStore    *storage.HealthStore   // per-node per-protocol health
+	archivalStore  *storage.ArchivalStore // archival node tracking
+	oracleStore    *storage.OracleStore   // oracle reference heights
+	cache          *storage.Cache
+	endpointStore  *storage.ExternalEndpointStore
+	selector       *selector.Selector
+	registry       *adapter.Registry      // adapter registry
+	engine         *adapter.Engine        // check engine
+	oracleChecker  *checker.OracleChecker // oracle height checker
+	circuitBreaker *proxy.CircuitBreaker  // shared circuit breaker for HTTP proxies
+	statusServer   *http.Server
+	statusHandler  *status.Handler    // Kept so Shutdown() can call handler.Shutdown()
+	httpServers    []*http.Server     // All HTTP proxy servers
+	grpcServers    []*grpc.Server     // All gRPC proxy servers
+	grpcProxies    []*proxy.GRPCProxy // All gRPC proxy instances (for Close)
+	errCh          chan error         // Fatal errors from background goroutines
 }
 
 // New creates a new Sauron server
@@ -154,27 +155,31 @@ func New(configPath string) (*Server, error) {
 	// Initialize scheduler with V2 config.
 	sched := checker.NewMultiChainScheduler(engine, registry, store, healthStore, archivalStore, cache, endpointStore, oracleChecker, configLoader, pool, logger)
 
+	// Initialize shared circuit breaker backed by the health store.
+	cb := proxy.NewCircuitBreaker(healthStore, logger)
+
 	logger.Info("The Dark Lord's judgment ready",
 		zap.Int("networks", len(cfg.Networks)),
 		zap.Int("internal_nodes", len(cfg.Internals)),
 	)
 
 	return &Server{
-		configLoader:  configLoader,
-		logger:        logger,
-		pool:          pool,
-		scheduler:     sched,
-		store:         store,
-		healthStore:   healthStore,
-		archivalStore: archivalStore,
-		oracleStore:   oracleStore,
-		cache:         cache,
-		endpointStore: endpointStore,
-		selector:      sel,
-		registry:      registry,
-		engine:        engine,
-		oracleChecker: oracleChecker,
-		errCh:         make(chan error, 10),
+		configLoader:   configLoader,
+		logger:         logger,
+		pool:           pool,
+		scheduler:      sched,
+		store:          store,
+		healthStore:    healthStore,
+		archivalStore:  archivalStore,
+		oracleStore:    oracleStore,
+		cache:          cache,
+		endpointStore:  endpointStore,
+		selector:       sel,
+		registry:       registry,
+		engine:         engine,
+		oracleChecker:  oracleChecker,
+		circuitBreaker: cb,
+		errCh:          make(chan error, 10),
 	}, nil
 }
 
@@ -306,7 +311,7 @@ func (s *Server) startNetworkProxies(cfg *config.MultiChainConfig) error {
 
 // startHTTPProxy starts an HTTP proxy for a network endpoint.
 func (s *Server) startHTTPProxy(networkName, protocol, listenAddr string) {
-	proxyHandler := proxy.NewHTTPProxy(s.selector, s.configLoader, s.endpointStore, s.logger, protocol, networkName)
+	proxyHandler := proxy.NewHTTPProxy(s.selector, s.configLoader, s.endpointStore, s.logger, protocol, networkName, s.circuitBreaker)
 	server := &http.Server{
 		Addr:    listenAddr,
 		Handler: proxyHandler,
@@ -332,7 +337,7 @@ func (s *Server) startHTTPProxy(networkName, protocol, listenAddr string) {
 
 // startGRPCProxy starts a gRPC proxy for a network endpoint.
 func (s *Server) startGRPCProxy(networkName, listenAddr string) {
-	grpcProxy := proxy.NewGRPCProxy(s.selector, s.configLoader, s.endpointStore, s.logger, networkName)
+	grpcProxy := proxy.NewGRPCProxy(s.selector, s.configLoader, s.endpointStore, s.logger, networkName, s.circuitBreaker)
 	grpcServer := grpcProxy.GetServer()
 	s.grpcServers = append(s.grpcServers, grpcServer)
 	s.grpcProxies = append(s.grpcProxies, grpcProxy)

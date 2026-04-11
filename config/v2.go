@@ -25,13 +25,14 @@ type MultiChainConfig struct {
 
 // MultiChainNetwork represents a blockchain network with its chain type and endpoints.
 type MultiChainNetwork struct {
-	Name        string             `mapstructure:"name"`
-	Type        string             `mapstructure:"type"` // "cosmos", "evm", "solana", "custom"
-	HeightCheck *HeightCheckConfig `mapstructure:"height_check"`
-	Endpoints   []NetworkEndpoint  `mapstructure:"endpoints"`
-	Mode        string             `mapstructure:"mode"` // EVM: "latest", "safe", "finalized"
-	Archival    *ArchivalCheck     `mapstructure:"archival"`
-	Sync        *SyncCheck         `mapstructure:"sync"`
+	Name           string                `mapstructure:"name"`
+	Type           string                `mapstructure:"type"` // "cosmos", "evm", "solana", "custom"
+	HeightCheck    *HeightCheckConfig    `mapstructure:"height_check"`
+	Endpoints      []NetworkEndpoint     `mapstructure:"endpoints"`
+	Mode           string                `mapstructure:"mode"` // EVM: "latest", "safe", "finalized"
+	Archival       *ArchivalCheck        `mapstructure:"archival"`
+	Sync           *SyncCheck            `mapstructure:"sync"`
+	CircuitBreaker *CircuitBreakerConfig `mapstructure:"circuit_breaker"`
 }
 
 // HeightCheckConfig configures how to determine a node's block height.
@@ -78,6 +79,17 @@ type SyncOracle struct {
 	Body           string            `mapstructure:"body"`
 	ResponsePath   string            `mapstructure:"response_path"`
 	ResponseFormat string            `mapstructure:"response_format"`
+}
+
+// CircuitBreakerConfig configures per-network circuit breaking and retry behavior.
+// When a backend returns a retriable error code, the request is retried to a different
+// node. After threshold consecutive errors, the node is marked unhealthy.
+type CircuitBreakerConfig struct {
+	HTTPCodes     []int         `mapstructure:"http_codes"`     // HTTP status codes that trigger retry (e.g. 429, 500, 502, 503)
+	GRPCCodes     []string      `mapstructure:"grpc_codes"`     // gRPC status codes (e.g. "unavailable", "internal", "resource_exhausted")
+	Threshold     int           `mapstructure:"threshold"`      // Consecutive errors before marking unhealthy
+	RetryAttempts int           `mapstructure:"retry_attempts"` // Number of retries (0 = no retry, just circuit break)
+	RetryBackoff  time.Duration `mapstructure:"retry_backoff"`  // Fixed delay between retries
 }
 
 // MultiChainNode represents an internal node with per-protocol endpoints.

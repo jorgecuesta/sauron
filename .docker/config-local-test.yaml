@@ -32,7 +32,7 @@ networks:
       - protocol: rpc
         listen: ":8081"
 
-  # EVM — Optimism with ARCHIVAL filter + SYNC filter
+  # EVM — Optimism with ARCHIVAL + SYNC + CIRCUIT BREAKER
   - name: optimism
     type: evm
     mode: latest
@@ -49,6 +49,11 @@ networks:
       check_interval: 30s
       oracles:
         - url: "https://mainnet.optimism.io"
+    circuit_breaker:
+      http_codes: [429, 500, 502, 503]
+      threshold: 3
+      retry_attempts: 2
+      retry_backoff: 100ms
 
   # EVM — BSC (2 nodes, round-robin)
   - name: bsc

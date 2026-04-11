@@ -1,13 +1,13 @@
 package proxy
 
 import (
-	"context"
+	"bytes"
+	"errors"
+	"io"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"sauron/config"
@@ -18,10 +18,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// contextKey is an unexported type for context keys in this package.
-type contextKey int
+// maxRequestBodySize is the maximum body size buffered for retry support (10 MB).
+const maxRequestBodySize = 10 * 1024 * 1024
 
-const targetContextKey contextKey = iota
+// errRetriable is returned by forwardRequest when the attempt should be retried.
+var errRetriable = errors.New("retriable error")
 
 // singleJoiningSlash replicates the stdlib helper used by httputil.NewSingleHostReverseProxy.
 func singleJoiningSlash(a, b string) string {
@@ -36,30 +37,29 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
-// HTTPProxy handles HTTP/API and RPC proxying
+// HTTPProxy handles HTTP/API and RPC proxying with retry and circuit-breaking support.
 // The gates through which the Ringwraiths pass
 type HTTPProxy struct {
 	selector       *selector.Selector
 	configLoader   *config.MultiChainLoader
 	endpointStore  *storage.ExternalEndpointStore
 	transport      *http.Transport
-	reverseProxy   *httputil.ReverseProxy
+	circuitBreaker *CircuitBreaker // shared circuit breaker (can be nil)
 	logger         *zap.Logger
 	endpointType   string // V2 protocol name: "rest", "rpc", "jsonrpc", "http", etc.
 	network        string // The network this proxy serves
-	proxyTimeoutNs atomic.Int64
 }
 
-// NewHTTPProxy creates a new HTTP proxy for a specific network
+// NewHTTPProxy creates a new HTTP proxy for a specific network.
 func NewHTTPProxy(
-	selector *selector.Selector,
+	sel *selector.Selector,
 	configLoader *config.MultiChainLoader,
 	endpointStore *storage.ExternalEndpointStore,
 	logger *zap.Logger,
 	endpointType string,
 	network string,
+	circuitBreaker *CircuitBreaker,
 ) *HTTPProxy {
-	// C1 FIX: Read the timeout once here; never mutate transport after construction.
 	cfg := configLoader.Get()
 	proxyTimeout := cfg.Timeouts.Proxy
 	if proxyTimeout == 0 {
@@ -77,83 +77,23 @@ func NewHTTPProxy(
 		TLSHandshakeTimeout:   10 * time.Second,
 	}
 
-	p := &HTTPProxy{
-		selector:      selector,
-		configLoader:  configLoader,
-		endpointStore: endpointStore,
-		transport:     transport,
-		logger:        logger,
-		endpointType:  endpointType,
-		network:       network,
+	return &HTTPProxy{
+		selector:       sel,
+		configLoader:   configLoader,
+		endpointStore:  endpointStore,
+		transport:      transport,
+		circuitBreaker: circuitBreaker,
+		logger:         logger,
+		endpointType:   endpointType,
+		network:        network,
 	}
-	// Store timeout as nanoseconds for potential future hot-reload.
-	p.proxyTimeoutNs.Store(int64(proxyTimeout))
-
-	// H1 FIX: Build ONE shared ReverseProxy in the constructor.
-	// The Director reads the target URL from request context so it is
-	// safe to share across all concurrent requests.
-	rp := &httputil.ReverseProxy{
-		Transport: transport,
-		Director: func(req *http.Request) {
-			target, _ := req.Context().Value(targetContextKey).(*url.URL)
-			if target == nil {
-				return
-			}
-
-			// Replicate full httputil.NewSingleHostReverseProxy Director behavior:
-			// 1. Set scheme and host.
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-
-			// 2. Merge paths using singleJoiningSlash.
-			req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-			if target.Path != "" && req.URL.RawPath != "" {
-				req.URL.RawPath = singleJoiningSlash(target.RawPath, req.URL.RawPath)
-			}
-
-			// 3. Merge RawQuery — join with "&" when both non-empty.
-			if target.RawQuery == "" || req.URL.RawQuery == "" {
-				req.URL.RawQuery = target.RawQuery + req.URL.RawQuery
-			} else {
-				req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
-			}
-
-			// 4. Set Host header to backend host.
-			req.Host = target.Host
-
-			// Log outgoing request (Debug — hot path).
-			p.logger.Debug("Outgoing request to backend",
-				zap.String("method", req.Method),
-				zap.String("url", req.URL.String()),
-				zap.String("host", req.Host),
-				zap.String("path", req.URL.Path),
-				zap.String("raw_query", req.URL.RawQuery),
-			)
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			target, _ := r.Context().Value(targetContextKey).(*url.URL)
-			backendHost := ""
-			if target != nil {
-				backendHost = target.Host
-			}
-			p.logger.Error("Reverse proxy error",
-				zap.Error(err),
-				zap.String("path", r.URL.Path),
-				zap.String("backend", backendHost),
-			)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		},
-	}
-
-	p.reverseProxy = rp
-	return p
 }
 
-// ServeHTTP handles the proxy request
+// ServeHTTP handles the proxy request with retry and circuit-breaker support.
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	network := p.network
 
-	// H3 FIX: per-request logs demoted to Debug.
 	p.logger.Debug("Proxy request received",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
@@ -161,91 +101,204 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.Bool("websocket", IsWebSocketRequest(r)),
 	)
 
-	// Use the network this proxy is configured for (no detection needed!)
-	network := p.network
+	// Buffer request body for potential retry.
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize))
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
 
-	// Select best node
-	nodeMetrics, nodeName, decision := p.selector.GetBestNode(network, p.endpointType)
-	if nodeMetrics == nil || nodeName == "" {
-		p.logger.Warn("No available nodes for routing",
+	// Determine retry budget from circuit breaker config.
+	cbCfg := p.getCircuitBreakerConfig()
+	maxAttempts := 1
+	if cbCfg != nil && cbCfg.RetryAttempts > 0 {
+		maxAttempts += cbCfg.RetryAttempts
+	}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 && cbCfg != nil && cbCfg.RetryBackoff > 0 {
+			time.Sleep(cbCfg.RetryBackoff)
+		}
+
+		// Select best node for this attempt.
+		nodeMetrics, nodeName, decision := p.selector.GetBestNode(network, p.endpointType)
+		if nodeMetrics == nil || nodeName == "" {
+			if attempt == 0 {
+				p.logger.Warn("No available nodes for routing",
+					zap.String("network", network),
+					zap.String("type", p.endpointType),
+				)
+				http.Error(w, "No available nodes", http.StatusServiceUnavailable)
+				return
+			}
+			// No more nodes — fall through to 502.
+			break
+		}
+
+		// Get endpoint URL for selected node.
+		targetURL := p.selector.GetEndpointURL(nodeName, p.endpointType)
+		if targetURL == "" {
+			p.logger.Error("Failed to get endpoint URL",
+				zap.String("node", nodeName),
+				zap.String("type", p.endpointType),
+			)
+			continue
+		}
+
+		p.logger.Debug("Routing decision made",
 			zap.String("network", network),
-			zap.String("type", p.endpointType),
+			zap.String("selected_node", nodeName),
+			zap.String("target_url", targetURL),
+			zap.String("path", r.URL.Path),
+			zap.String("attempt", strconv.Itoa(attempt+1)+"/"+strconv.Itoa(maxAttempts)),
 		)
-		http.Error(w, "No available nodes", http.StatusServiceUnavailable)
+
+		// WebSocket upgrades are handled separately (no retry on WS).
+		if IsWebSocketRequest(r) {
+			target, parseErr := url.Parse(targetURL)
+			if parseErr != nil {
+				p.logger.Error("Failed to parse target URL for WebSocket",
+					zap.String("url", targetURL),
+					zap.Error(parseErr),
+				)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			p.handleWebSocket(w, r, target, nodeName, network, start, decision, nodeMetrics)
+			return
+		}
+
+		// Forward the request. forwardRequest writes the response to w on
+		// success (returns nil error). On retriable failure it returns errRetriable
+		// without touching w. On connection error it also returns errRetriable.
+		statusCode, fwdErr := p.forwardRequest(w, r, targetURL, bodyBytes, nodeName, network, start, decision, cbCfg)
+
+		if fwdErr != nil {
+			// Record circuit-breaker error for connection failures and retriable codes.
+			if p.circuitBreaker != nil && cbCfg != nil {
+				p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
+			}
+			// Record metric for the failed attempt.
+			if statusCode > 0 {
+				metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, strconv.Itoa(statusCode), "retriable").Inc()
+			}
+			p.logger.Debug("Retriable error on attempt",
+				zap.String("network", network),
+				zap.String("node", nodeName),
+				zap.Int("attempt", attempt+1),
+				zap.Int("status_code", statusCode),
+				zap.Error(fwdErr),
+			)
+			continue
+		}
+
+		// Success — circuit breaker reset, metrics already recorded in forwardRequest.
+		if p.circuitBreaker != nil {
+			p.circuitBreaker.RecordSuccess(network, nodeName, p.endpointType)
+		}
 		return
 	}
 
-	// Get endpoint URL
-	targetURL := p.selector.GetEndpointURL(nodeName, p.endpointType)
-	if targetURL == "" {
-		p.logger.Error("Failed to get endpoint URL",
-			zap.String("node", nodeName),
-			zap.String("type", p.endpointType),
-		)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
+	// All attempts exhausted.
+	http.Error(w, "Bad Gateway", http.StatusBadGateway)
+}
 
-	// H3 FIX: per-request logs demoted to Debug.
-	p.logger.Debug("Routing decision made",
-		zap.String("network", network),
-		zap.String("selected_node", nodeName),
-		zap.String("target_url", targetURL),
-		zap.String("path", r.URL.Path),
-	)
-
-	// Parse target URL
+// forwardRequest forwards the HTTP request to the backend.
+//
+// On success or non-retriable response: writes headers+body to w, records all
+// metrics, and returns (statusCode, nil).
+//
+// On connection error or retriable status code: discards the backend response
+// (to allow connection reuse), records no response metrics, and returns
+// (statusCode, errRetriable) so ServeHTTP can retry.
+func (p *HTTPProxy) forwardRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	targetURL string,
+	body []byte,
+	nodeName, network string,
+	start time.Time,
+	decision *selector.SelectionDecision,
+	cbCfg *config.CircuitBreakerConfig,
+) (int, error) {
 	target, err := url.Parse(targetURL)
 	if err != nil {
-		p.logger.Error("Failed to parse target URL",
-			zap.String("url", targetURL),
+		return 0, errRetriable
+	}
+
+	// Build outgoing URL — replicate full httputil.NewSingleHostReverseProxy Director behavior.
+	outURL := *target
+	outURL.Path = singleJoiningSlash(target.Path, r.URL.Path)
+	if target.Path != "" && r.URL.RawPath != "" {
+		outURL.RawPath = singleJoiningSlash(target.RawPath, r.URL.RawPath)
+	}
+	if target.RawQuery == "" || r.URL.RawQuery == "" {
+		outURL.RawQuery = target.RawQuery + r.URL.RawQuery
+	} else {
+		outURL.RawQuery = target.RawQuery + "&" + r.URL.RawQuery
+	}
+
+	// Create outgoing request with the buffered body.
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, errRetriable
+	}
+
+	// Copy headers from original request.
+	for k, vv := range r.Header {
+		for _, v := range vv {
+			outReq.Header.Add(k, v)
+		}
+	}
+	// Override Host to match the backend.
+	outReq.Header.Set("Host", target.Host)
+	outReq.Host = target.Host
+
+	p.logger.Debug("Outgoing request to backend",
+		zap.String("method", outReq.Method),
+		zap.String("url", outReq.URL.String()),
+		zap.String("host", outReq.Host),
+		zap.String("path", outReq.URL.Path),
+		zap.String("raw_query", outReq.URL.RawQuery),
+	)
+
+	// Execute the request via the shared transport.
+	resp, err := p.transport.RoundTrip(outReq)
+	if err != nil {
+		p.logger.Error("Reverse proxy error",
 			zap.Error(err),
+			zap.String("path", r.URL.Path),
+			zap.String("backend", target.Host),
 		)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
+		return 0, errRetriable
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Check if this status code should trigger a retry.
+	if cbCfg != nil && isRetriableHTTPCode(resp.StatusCode, cbCfg.HTTPCodes) {
+		// Drain body to allow connection reuse.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode, errRetriable
 	}
 
-	// Handle WebSocket upgrade requests separately.
-	// H9 FIX: pass nodeMetrics so handleWebSocket doesn't call GetBestNode again.
-	if IsWebSocketRequest(r) {
-		p.handleWebSocket(w, r, target, nodeName, network, start, decision, nodeMetrics)
-		return
+	// Non-retriable response — write it to the client.
+	// Copy response headers.
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
 	}
+	w.WriteHeader(resp.StatusCode)
+	bytesWritten, _ := io.Copy(w, resp.Body)
 
-	// H1 FIX: store target in context so the shared Director can read it.
-	ctx := context.WithValue(r.Context(), targetContextKey, target)
-	r = r.WithContext(ctx)
-
-	// Apply per-request timeout via context (dynamic, race-free).
-	timeoutNs := p.proxyTimeoutNs.Load()
-	if timeoutNs > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(r.Context(), time.Duration(timeoutNs))
-		defer cancel()
-		r = r.WithContext(ctx)
-	}
-
-	// Wrap response writer to track status and size
-	tracker := &responseTracker{ResponseWriter: w, statusCode: 200}
-
-	// H3 FIX: per-request logs demoted to Debug.
-	p.logger.Debug("Proxying to backend",
-		zap.String("backend_host", target.Host),
-		zap.String("backend_scheme", target.Scheme),
-		zap.String("request_path", r.URL.Path),
-		zap.String("request_query", r.URL.RawQuery),
-	)
-	p.reverseProxy.ServeHTTP(tracker, r)
-
-	// H3 FIX: per-request log demoted to Debug.
 	p.logger.Debug("Backend response received",
-		zap.Int("status_code", tracker.statusCode),
-		zap.Int64("response_bytes", tracker.bytesWritten),
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int64("response_bytes", bytesWritten),
 	)
 
-	// Record metrics
+	// Record metrics.
 	duration := time.Since(start)
-	statusStr := strconv.Itoa(tracker.statusCode)
+	statusStr := strconv.Itoa(resp.StatusCode)
 
 	metrics.ProxyRequestDuration.WithLabelValues(
 		network,
@@ -254,21 +307,21 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		statusStr,
 	).Observe(duration.Seconds())
 
-	metrics.ProxyResponseSize.WithLabelValues(network, p.endpointType).Observe(float64(tracker.bytesWritten))
+	metrics.ProxyResponseSize.WithLabelValues(network, p.endpointType).Observe(float64(bytesWritten))
 	metrics.NodeRequests.WithLabelValues(network, nodeName, p.endpointType, r.Method).Inc()
 
-	if tracker.statusCode >= 400 {
+	if resp.StatusCode >= 400 {
 		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, "http_error").Inc()
 	}
 
-	// Track 5xx errors for external endpoints
-	if tracker.statusCode >= 500 && p.endpointStore != nil {
+	// Track 5xx errors for external endpoint health.
+	if resp.StatusCode >= 500 && p.endpointStore != nil {
 		if p.endpointStore.TrackProxyError(network, p.endpointType, targetURL) {
 			p.logger.Debug("Tracked 5xx error for external endpoint",
 				zap.String("url", targetURL),
 				zap.String("network", network),
 				zap.String("type", p.endpointType),
-				zap.Int("status", tracker.statusCode),
+				zap.Int("status", resp.StatusCode),
 			)
 		}
 	}
@@ -279,29 +332,34 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.String("type", p.endpointType),
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.Int("status", tracker.statusCode),
-		zap.Int64("bytes", tracker.bytesWritten),
+		zap.Int("status", resp.StatusCode),
+		zap.Int64("bytes", bytesWritten),
 		zap.Duration("duration", duration),
 		zap.String("selection_reason", decision.Reason),
 	)
+
+	return resp.StatusCode, nil
 }
 
-// responseTracker tracks response status and size
-type responseTracker struct {
-	http.ResponseWriter
-	statusCode   int
-	bytesWritten int64
+// isRetriableHTTPCode reports whether code is in the retriable set.
+func isRetriableHTTPCode(code int, retriableCodes []int) bool {
+	for _, c := range retriableCodes {
+		if code == c {
+			return true
+		}
+	}
+	return false
 }
 
-func (rt *responseTracker) WriteHeader(code int) {
-	rt.statusCode = code
-	rt.ResponseWriter.WriteHeader(code)
-}
-
-func (rt *responseTracker) Write(b []byte) (int, error) {
-	n, err := rt.ResponseWriter.Write(b)
-	rt.bytesWritten += int64(n)
-	return n, err
+// getCircuitBreakerConfig returns the CircuitBreakerConfig for this proxy's network.
+// Returns nil when unconfigured.
+func (p *HTTPProxy) getCircuitBreakerConfig() *config.CircuitBreakerConfig {
+	cfg := p.configLoader.Get()
+	net := cfg.FindNetwork(p.network)
+	if net == nil {
+		return nil
+	}
+	return net.CircuitBreaker
 }
 
 // handleWebSocket handles WebSocket proxy requests.
@@ -343,6 +401,12 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 			zap.Duration("duration", duration),
 		)
 		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, errCategory).Inc()
+
+		// Record circuit-breaker error for WebSocket backend failures.
+		cbCfg := p.getCircuitBreakerConfig()
+		if p.circuitBreaker != nil && cbCfg != nil {
+			p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
+		}
 	} else {
 		p.logger.Debug("WebSocket proxied",
 			zap.String("network", network),
@@ -351,5 +415,10 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 			zap.Duration("duration", duration),
 			zap.String("selection_reason", decision.Reason),
 		)
+
+		// Record circuit-breaker success for WebSocket.
+		if p.circuitBreaker != nil {
+			p.circuitBreaker.RecordSuccess(network, nodeName, p.endpointType)
+		}
 	}
 }

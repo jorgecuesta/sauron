@@ -221,6 +221,20 @@ func TestFactory_HealthChecks_Empty(t *testing.T) {
 	}
 }
 
+func TestFactory_HealthChecks_EmptyURLSkipped(t *testing.T) {
+	t.Parallel()
+	f := New()
+	checks, err := f.HealthChecks(adapter.NetworkConfig{}, adapter.NodeConfig{
+		Endpoint: map[string]string{"jsonrpc": "", "websocket": ""},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(checks) != 0 {
+		t.Fatalf("expected 0 checks for empty URLs, got %d", len(checks))
+	}
+}
+
 func TestFactory_HealthChecks_UnknownIgnored(t *testing.T) {
 	t.Parallel()
 	f := New()
@@ -330,6 +344,117 @@ func TestIntegration_HealthCheck_GetHealth(t *testing.T) {
 	err := engine.CheckHealth(context.Background(), checks[0], srv.URL)
 	if err != nil {
 		t.Fatalf("health check failed: %v", err)
+	}
+}
+
+func TestFactory_ArchivalCheck(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		net              adapter.NetworkConfig
+		minHeight        int64
+		wantCommitment   string
+		wantSlot         float64
+	}{
+		{
+			name:           "default commitment is finalized",
+			net:            adapter.NetworkConfig{Name: "solana", Type: "solana"},
+			minHeight:      1000,
+			wantCommitment: "finalized",
+			wantSlot:       1000,
+		},
+		{
+			name: "confirmed commitment",
+			net: adapter.NetworkConfig{
+				Name: "solana", Type: "solana", Mode: "confirmed",
+			},
+			minHeight:      500000,
+			wantCommitment: "confirmed",
+			wantSlot:       500000,
+		},
+		{
+			name: "processed commitment",
+			net: adapter.NetworkConfig{
+				Name: "solana", Type: "solana", Mode: "processed",
+			},
+			minHeight:      1,
+			wantCommitment: "processed",
+			wantSlot:       1,
+		},
+		{
+			name:           "height 0",
+			net:            adapter.NetworkConfig{Name: "solana", Type: "solana"},
+			minHeight:      0,
+			wantCommitment: "finalized",
+			wantSlot:       0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := New()
+			cfg, err := f.ArchivalCheck(tt.net, tt.minHeight)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if cfg.Method != "POST" {
+				t.Fatalf("Method: got %q, want POST", cfg.Method)
+			}
+			if cfg.URLPath != "/" {
+				t.Fatalf("URLPath: got %q, want /", cfg.URLPath)
+			}
+			if cfg.Headers.Get("Content-Type") != "application/json" {
+				t.Fatal("Content-Type header missing or wrong")
+			}
+			if cfg.ResponsePath != ".result.blockHeight" {
+				t.Fatalf("ResponsePath: got %q, want .result.blockHeight", cfg.ResponsePath)
+			}
+			if cfg.ResponseFormat != "integer" {
+				t.Fatalf("ResponseFormat: got %q, want integer", cfg.ResponseFormat)
+			}
+			if cfg.Protocol != "jsonrpc" {
+				t.Fatalf("Protocol: got %q, want jsonrpc", cfg.Protocol)
+			}
+
+			// Verify body is valid JSON-RPC with getBlock method.
+			var rpc struct {
+				JSONRPC string `json:"jsonrpc"`
+				Method  string `json:"method"`
+				Params  []any  `json:"params"`
+				ID      int    `json:"id"`
+			}
+			if err := json.Unmarshal(cfg.Body, &rpc); err != nil {
+				t.Fatalf("body is not valid JSON: %v", err)
+			}
+			if rpc.Method != "getBlock" {
+				t.Fatalf("RPC method: got %q, want getBlock", rpc.Method)
+			}
+			if len(rpc.Params) < 2 {
+				t.Fatalf("expected at least 2 params, got %d", len(rpc.Params))
+			}
+
+			// First param is the slot number (integer).
+			slot, ok := rpc.Params[0].(float64)
+			if !ok {
+				t.Fatalf("first param (slot) not number: %T", rpc.Params[0])
+			}
+			if slot != tt.wantSlot {
+				t.Fatalf("slot: got %v, want %v", slot, tt.wantSlot)
+			}
+
+			// Second param is the config object with commitment.
+			opts, ok := rpc.Params[1].(map[string]any)
+			if !ok {
+				t.Fatalf("second param not object: %T", rpc.Params[1])
+			}
+			commitment, ok := opts["commitment"].(string)
+			if !ok || commitment != tt.wantCommitment {
+				t.Fatalf("commitment: got %q, want %q", opts["commitment"], tt.wantCommitment)
+			}
+		})
 	}
 }
 

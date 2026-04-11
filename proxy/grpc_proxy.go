@@ -58,11 +58,12 @@ func init() {
 // GRPCProxy handles gRPC proxying with transparent request forwarding
 // The Eye's gaze through the gRPC realm
 type GRPCProxy struct {
-	selector      *selector.Selector
-	configLoader  *config.MultiChainLoader
-	endpointStore *storage.ExternalEndpointStore
-	logger        *zap.Logger
-	network       string // The network this proxy serves
+	selector       *selector.Selector
+	configLoader   *config.MultiChainLoader
+	endpointStore  *storage.ExternalEndpointStore
+	circuitBreaker *CircuitBreaker
+	logger         *zap.Logger
+	network        string // The network this proxy serves
 
 	// Connection pool for backend connections (optimization)
 	connPool  map[string]*grpc.ClientConn
@@ -77,14 +78,16 @@ func NewGRPCProxy(
 	endpointStore *storage.ExternalEndpointStore,
 	logger *zap.Logger,
 	network string,
+	circuitBreaker *CircuitBreaker,
 ) *GRPCProxy {
 	return &GRPCProxy{
-		selector:      selector,
-		configLoader:  configLoader,
-		endpointStore: endpointStore,
-		logger:        logger,
-		network:       network,
-		connPool:      make(map[string]*grpc.ClientConn),
+		selector:       selector,
+		configLoader:   configLoader,
+		endpointStore:  endpointStore,
+		circuitBreaker: circuitBreaker,
+		logger:         logger,
+		network:        network,
+		connPool:       make(map[string]*grpc.ClientConn),
 	}
 }
 

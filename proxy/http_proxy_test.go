@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -61,80 +60,92 @@ internals:
 // newTestProxy creates a fully-wired HTTPProxy that routes to a backend whose
 // URL is passed in. The height store is seeded so GetBestNode succeeds.
 // ---------------------------------------------------------------------------
-// T1: TestDirectorPreservesRawQuery
+// T1: TestSingleJoiningSlash
 // ---------------------------------------------------------------------------
 
-// TestDirectorPreservesRawQuery verifies that when a target URL carries a
-// query string and the incoming request also has a query string, the Director
-// joins them with "&" so neither is dropped.
-func TestDirectorPreservesRawQuery(t *testing.T) {
-	target, _ := url.Parse("http://backend.example.com/prefix?key=abc")
-
-	// Simulate an incoming request with its own query param.
-	req, _ := http.NewRequest("GET", "http://proxy.example.com/endpoint?page=1", nil)
-
-	// Inject target into context (same way ServeHTTP does it).
-	ctx := context.WithValue(req.Context(), targetContextKey, target)
-	req = req.WithContext(ctx)
-
-	// Call the director logic directly (not through the deprecated Director field).
-	applyDirector(req, zap.NewNop())
-
-	q := req.URL.RawQuery
-	if q != "key=abc&page=1" {
-		t.Errorf("expected RawQuery %q, got %q", "key=abc&page=1", q)
+// TestSingleJoiningSlash verifies the URL path joining helper used in forwardRequest.
+func TestSingleJoiningSlash(t *testing.T) {
+	tests := []struct {
+		a, b, want string
+	}{
+		{"/prefix", "/path", "/prefix/path"},
+		{"/prefix/", "/path", "/prefix/path"},
+		{"/prefix", "path", "/prefix/path"},
+		{"/prefix/", "path", "/prefix/path"},
+		{"", "/path", "/path"},
+		{"/prefix", "", "/prefix/"},
+	}
+	for _, tt := range tests {
+		got := singleJoiningSlash(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("singleJoiningSlash(%q, %q) = %q; want %q", tt.a, tt.b, got, tt.want)
+		}
 	}
 }
 
-// applyDirector replicates the Director logic from NewHTTPProxy so we can
-// unit-test URL rewriting without going through the deprecated Director field.
-func applyDirector(req *http.Request, logger *zap.Logger) {
-	target, _ := req.Context().Value(targetContextKey).(*url.URL)
-	if target == nil {
-		return
-	}
-	req.URL.Scheme = target.Scheme
-	req.URL.Host = target.Host
-	req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-	if target.Path != "" && req.URL.RawPath != "" {
-		req.URL.RawPath = singleJoiningSlash(target.RawPath, req.URL.RawPath)
-	}
-	if target.RawQuery == "" || req.URL.RawQuery == "" {
-		req.URL.RawQuery = target.RawQuery + req.URL.RawQuery
-	} else {
-		req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
-	}
-	req.Host = target.Host
-}
-
 // ---------------------------------------------------------------------------
-// T2: TestDirectorSetsTargetFromContext
+// T2: TestForwardRequestURLMerging
 // ---------------------------------------------------------------------------
 
-// TestDirectorSetsTargetFromContext verifies that the shared Director reads the
-// target URL out of request context and correctly sets Scheme, Host, and Path.
-func TestDirectorSetsTargetFromContext(t *testing.T) {
-	target, _ := url.Parse("https://backend.example.com/v1")
+// TestForwardRequestURLMerging verifies that forwardRequest correctly merges
+// target base URL with the incoming request's path and query string.
+func TestForwardRequestURLMerging(t *testing.T) {
+	// Backend that records the URL it receives.
+	var receivedURL *url.URL
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedURL = r.URL
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
 
-	req, _ := http.NewRequest("POST", "http://proxy.local/rpc", nil)
-	ctx := context.WithValue(req.Context(), targetContextKey, target)
-	req = req.WithContext(ctx)
+	backendHost := backend.Listener.Addr().String()
+	targetURL := "http://" + backendHost + "/prefix"
 
-	applyDirector(req, zap.NewNop())
+	yaml := `
+listen: ":3000"
+external_failover_threshold: 2
+timeouts:
+  health_check: 5s
+  proxy: 5s
+networks:
+  - name: "testnet"
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+internals:
+  - name: node-1
+    network: "testnet"
+    endpoints:
+      rest: "` + targetURL + `"
+`
+	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
+	heightStore := storage.NewHeightStore()
+	heightStore.Update("testnet", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
+	p := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet", nil)
 
-	if req.URL.Scheme != "https" {
-		t.Errorf("scheme: want %q got %q", "https", req.URL.Scheme)
+	req := httptest.NewRequest("GET", "/endpoint?page=1", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
 	}
-	if req.URL.Host != "backend.example.com" {
-		t.Errorf("host: want %q got %q", "backend.example.com", req.URL.Host)
+	if receivedURL == nil {
+		t.Fatal("backend never received the request")
 	}
-	if req.Host != "backend.example.com" {
-		t.Errorf("req.Host: want %q got %q", "backend.example.com", req.Host)
+	// Path should be joined: /prefix + /endpoint → /prefix/endpoint
+	if receivedURL.Path != "/prefix/endpoint" {
+		t.Errorf("path: want %q, got %q", "/prefix/endpoint", receivedURL.Path)
 	}
-	// Path should be joined: target "/v1" + request "/rpc" → "/v1/rpc"
-	wantPath := "/v1/rpc"
-	if req.URL.Path != wantPath {
-		t.Errorf("path: want %q got %q", wantPath, req.URL.Path)
+	// Query should be preserved.
+	if receivedURL.RawQuery != "page=1" {
+		t.Errorf("query: want %q, got %q", "page=1", receivedURL.RawQuery)
 	}
 }
 
@@ -203,7 +214,7 @@ internals:
 
 	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
 	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
-	proxy := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet")
+	proxy := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet", nil)
 
 	const goroutines = 50
 	var wg sync.WaitGroup
@@ -257,5 +268,193 @@ func TestHandleWebSocketUsesOriginalNodeMetrics(t *testing.T) {
 
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rr.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T5: TestHTTPProxy_RetryOnRetriableCode
+// ---------------------------------------------------------------------------
+
+// TestHTTPProxy_RetryOnRetriableCode verifies that when the first backend returns
+// a retriable status code (503), the proxy retries to the same node (or another)
+// and the client eventually gets a 200.
+func TestHTTPProxy_RetryOnRetriableCode(t *testing.T) {
+	t.Parallel()
+
+	var attempts int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable) // 503 — retriable
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("success"))
+	}))
+	defer backend.Close()
+
+	yaml := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 5s
+networks:
+  - name: testnet
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":18080"
+    circuit_breaker:
+      http_codes: [429, 500, 502, 503]
+      threshold: 5
+      retry_attempts: 3
+      retry_backoff: 10ms
+internals:
+  - name: node-1
+    network: testnet
+    endpoints:
+      rest: "` + backend.URL + `"
+      rpc: "` + backend.URL + `"
+`
+	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
+	heightStore := storage.NewHeightStore()
+	heightStore.Update("testnet", "node-1", "rpc", 100, time.Millisecond, "internal")
+	healthStore := storage.NewHealthStore()
+	healthStore.SetHealthy("testnet", "node-1", "rest")
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
+	sel.SetHealthStore(healthStore)
+	cb := NewCircuitBreaker(healthStore, zap.NewNop())
+	p := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet", cb)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 after retry, got %d", rr.Code)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts (2 fails + 1 success), got %d", attempts)
+	}
+}
+
+// TestHTTPProxy_NoRetryOn400 verifies that client errors (4xx except 429)
+// are NOT retried — they're the client's fault, not the node's.
+func TestHTTPProxy_NoRetryOn400(t *testing.T) {
+	t.Parallel()
+
+	var attempts int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadRequest) // 400 — not retriable
+	}))
+	defer backend.Close()
+
+	yaml := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 5s
+networks:
+  - name: testnet
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":18080"
+    circuit_breaker:
+      http_codes: [429, 500, 502, 503]
+      threshold: 3
+      retry_attempts: 2
+      retry_backoff: 10ms
+internals:
+  - name: node-1
+    network: testnet
+    endpoints:
+      rest: "` + backend.URL + `"
+      rpc: "` + backend.URL + `"
+`
+	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
+	heightStore := storage.NewHeightStore()
+	heightStore.Update("testnet", "node-1", "rpc", 100, time.Millisecond, "internal")
+	healthStore := storage.NewHealthStore()
+	healthStore.SetHealthy("testnet", "node-1", "rest")
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
+	sel.SetHealthStore(healthStore)
+	cb := NewCircuitBreaker(healthStore, zap.NewNop())
+	p := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet", cb)
+
+	req := httptest.NewRequest("GET", "/bad", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 passed through, got %d", rr.Code)
+	}
+	if attempts != 1 {
+		t.Errorf("expected 1 attempt (no retry on 400), got %d", attempts)
+	}
+}
+
+// TestHTTPProxy_AllRetriesFail verifies that when all retries fail,
+// the client gets a 502 Bad Gateway.
+func TestHTTPProxy_AllRetriesFail(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // always 503
+	}))
+	defer backend.Close()
+
+	yaml := `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 5s
+networks:
+  - name: testnet
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rest
+        listen: ":18080"
+    circuit_breaker:
+      http_codes: [503]
+      threshold: 5
+      retry_attempts: 2
+      retry_backoff: 10ms
+internals:
+  - name: node-1
+    network: testnet
+    endpoints:
+      rest: "` + backend.URL + `"
+      rpc: "` + backend.URL + `"
+`
+	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
+	heightStore := storage.NewHeightStore()
+	heightStore.Update("testnet", "node-1", "rpc", 100, time.Millisecond, "internal")
+	healthStore := storage.NewHealthStore()
+	healthStore.SetHealthy("testnet", "node-1", "rest")
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
+	sel.SetHealthStore(healthStore)
+	cb := NewCircuitBreaker(healthStore, zap.NewNop())
+	p := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", "testnet", cb)
+
+	req := httptest.NewRequest("GET", "/fail", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 after all retries, got %d", rr.Code)
 	}
 }
