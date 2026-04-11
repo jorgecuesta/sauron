@@ -328,6 +328,94 @@ func TestFactory_HealthChecks_UnknownProtocolIgnored(t *testing.T) {
 	}
 }
 
+func TestFactory_ArchivalCheck(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		minHeight int64
+		wantHex   string
+	}{
+		{
+			name:      "height 1 encodes as 0x1",
+			minHeight: 1,
+			wantHex:   "0x1",
+		},
+		{
+			name:      "height 100 encodes as 0x64",
+			minHeight: 100,
+			wantHex:   "0x64",
+		},
+		{
+			name:      "height 1000000 encodes as 0xf4240",
+			minHeight: 1000000,
+			wantHex:   "0xf4240",
+		},
+		{
+			name:      "height 0 encodes as 0x0",
+			minHeight: 0,
+			wantHex:   "0x0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := New()
+			cfg, err := f.ArchivalCheck(adapter.NetworkConfig{Name: "ethereum", Type: "evm"}, tt.minHeight)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if cfg.Method != "POST" {
+				t.Fatalf("Method: got %q, want POST", cfg.Method)
+			}
+			if cfg.URLPath != "/" {
+				t.Fatalf("URLPath: got %q, want /", cfg.URLPath)
+			}
+			if cfg.Headers.Get("Content-Type") != "application/json" {
+				t.Fatal("Content-Type header missing or wrong")
+			}
+			if cfg.ResponsePath != ".result.number" {
+				t.Fatalf("ResponsePath: got %q, want .result.number", cfg.ResponsePath)
+			}
+			if cfg.ResponseFormat != "hex" {
+				t.Fatalf("ResponseFormat: got %q, want hex", cfg.ResponseFormat)
+			}
+			if cfg.Protocol != "jsonrpc" {
+				t.Fatalf("Protocol: got %q, want jsonrpc", cfg.Protocol)
+			}
+
+			// Verify body is valid JSON-RPC with correct method and hex-encoded height.
+			var rpc jsonRPCRequest
+			if err := json.Unmarshal(cfg.Body, &rpc); err != nil {
+				t.Fatalf("body is not valid JSON: %v", err)
+			}
+			if rpc.Method != "eth_getBlockByNumber" {
+				t.Fatalf("RPC method: got %q, want eth_getBlockByNumber", rpc.Method)
+			}
+			if len(rpc.Params) < 1 {
+				t.Fatal("expected at least 1 param")
+			}
+			hexParam, ok := rpc.Params[0].(string)
+			if !ok {
+				t.Fatalf("first param not string: %T", rpc.Params[0])
+			}
+			if hexParam != tt.wantHex {
+				t.Fatalf("hex param: got %q, want %q", hexParam, tt.wantHex)
+			}
+			// Second param should be false (full transaction objects = false).
+			if len(rpc.Params) < 2 {
+				t.Fatal("expected at least 2 params")
+			}
+			fullTx, ok := rpc.Params[1].(bool)
+			if !ok || fullTx {
+				t.Fatalf("second param: got %v, want false", rpc.Params[1])
+			}
+		})
+	}
+}
+
 // Verify Factory satisfies ChainAdapter interface.
 var _ adapter.ChainAdapter = (*Factory)(nil)
 

@@ -351,11 +351,11 @@ func TestFactory_ArchivalCheck(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		net              adapter.NetworkConfig
-		minHeight        int64
-		wantCommitment   string
-		wantSlot         float64
+		name           string
+		net            adapter.NetworkConfig
+		minHeight      int64
+		wantCommitment string
+		wantSlot       float64
 	}{
 		{
 			name:           "default commitment is finalized",

@@ -331,5 +331,53 @@ func TestFactory_HeightCheck_GRPCFields(t *testing.T) {
 	}
 }
 
+func TestFactory_ArchivalCheck(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		minHeight int64
+		wantPath  string
+	}{
+		{
+			name:      "height 1",
+			minHeight: 1,
+			wantPath:  "/cosmos/base/tendermint/v1beta1/blocks/1",
+		},
+		{
+			name:      "height 1000000",
+			minHeight: 1000000,
+			wantPath:  "/cosmos/base/tendermint/v1beta1/blocks/1000000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := New()
+			cfg, err := f.ArchivalCheck(adapter.NetworkConfig{Name: "pocket", Type: "cosmos"}, tt.minHeight)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if cfg.Method != "GET" {
+				t.Fatalf("Method: got %q, want GET", cfg.Method)
+			}
+			if cfg.URLPath != tt.wantPath {
+				t.Fatalf("URLPath: got %q, want %q", cfg.URLPath, tt.wantPath)
+			}
+			if cfg.ResponsePath != ".sdk_block.header.height" {
+				t.Fatalf("ResponsePath: got %q, want .sdk_block.header.height", cfg.ResponsePath)
+			}
+			if cfg.ResponseFormat != "string" {
+				t.Fatalf("ResponseFormat: got %q, want string", cfg.ResponseFormat)
+			}
+			if cfg.Protocol != "rest" {
+				t.Fatalf("Protocol: got %q, want rest", cfg.Protocol)
+			}
+		})
+	}
+}
+
 // Verify Factory satisfies ChainAdapter interface.
 var _ adapter.ChainAdapter = (*Factory)(nil)
