@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +100,22 @@ type grpcProxyHarness struct {
 // All resources are cleaned up via t.Cleanup.
 func setupGRPCProxyTest(t *testing.T, backendHandler grpc.StreamHandler) *grpcProxyHarness {
 	t.Helper()
+	return setupGRPCProxyTestWithOpts(t, backendHandler, grpcProxyTestOpts{})
+}
+
+// grpcProxyTestOpts tweaks setupGRPCProxyTestWithOpts; zero values keep defaults.
+type grpcProxyTestOpts struct {
+	maxSend int         // grpc_max_send_msg_size; also caps what the proxy sends to the backend
+	logger  *zap.Logger // proxy logger; nil means zap.NewNop()
+}
+
+// setupGRPCProxyTestWithOpts is setupGRPCProxyTest with opts applied.
+func setupGRPCProxyTestWithOpts(t *testing.T, backendHandler grpc.StreamHandler, opts grpcProxyTestOpts) *grpcProxyHarness {
+	t.Helper()
+	logger := opts.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 
 	// 1. Start backend on a random TCP port.
 	backendLis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -131,6 +148,7 @@ networks:
         listen: ":18081"
       - protocol: grpc
         listen: ":18082"
+        grpc_max_send_msg_size: ` + strconv.Itoa(opts.maxSend) + `
 
 internals:
   - name: node-1
@@ -155,7 +173,7 @@ internals:
 	sel.SetHealthStore(healthStore)
 
 	// 5. Create proxy (no circuit breaker — let tests add one if needed).
-	grpcProxy := NewGRPCProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "testnet", nil)
+	grpcProxy := NewGRPCProxy(sel, cfgLoader, endpointStore, logger, "testnet", nil)
 
 	// 6. Start proxy on a random TCP port.
 	proxyLis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -621,17 +639,16 @@ func TestGRPCProxy_BackendReturnsError(t *testing.T) {
 		t.Fatal("expected error from backend, got nil")
 	}
 
+	// The backend status must reach the client unchanged: same code, same message.
 	st, ok := status.FromError(err)
 	if !ok {
-		// Wrapped error is also acceptable — the important thing is err != nil.
-		return
+		t.Fatalf("error is not a gRPC status: %v", err)
 	}
-	// codes.Internal or codes.Unknown are both acceptable when backend returns Internal.
-	switch st.Code() {
-	case codes.Internal, codes.Unknown, codes.Unavailable:
-		// expected
-	default:
-		t.Errorf("unexpected gRPC status from backend error: %s", st.Code())
+	if st.Code() != codes.Internal {
+		t.Errorf("code = %s, want %s", st.Code(), codes.Internal)
+	}
+	if st.Message() != "deliberate backend error" {
+		t.Errorf("message = %q, want %q", st.Message(), "deliberate backend error")
 	}
 }
 

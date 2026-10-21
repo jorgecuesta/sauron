@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strconv"
@@ -256,6 +257,9 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
+	// Cancelled before returning so the server->client goroutine can be joined.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Create client stream
 	clientStream, err := conn.NewStream(ctx, &grpc.StreamDesc{
@@ -277,9 +281,11 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		zap.String("method", method),
 	)
 
-	// Create bidirectional forwarding using raw frames
-	// When one goroutine fails, we exit immediately without waiting for both
-	errChan := make(chan error, 2)
+	// Create bidirectional forwarding using raw frames.
+	// The backend side decides when the call ends: its status ends the call even
+	// if the client never half-closed. A client-side failure ends it at once.
+	c2sErr := make(chan error, 1)
+	s2cErr := make(chan error, 1)
 
 	// Forward client -> server
 	go func() {
@@ -292,18 +298,30 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 				if err == io.EOF {
 					p.logger.Debug("Received EOF from client, closing send")
 					_ = clientStream.CloseSend()
-					errChan <- nil
+					c2sErr <- nil
 					return
 				}
-				p.logger.Error("Error receiving from client", zap.Error(err))
-				errChan <- fmt.Errorf("recv from client: %w", err)
+				if stream.Context().Err() != nil {
+					// The call already ended (client cancel, or the backend's status
+					// was relayed and the handler returned): not a proxy failure.
+					p.logger.Debug("Client stream closed", zap.Error(err))
+				} else {
+					p.logger.Error("Error receiving from client", zap.Error(err))
+				}
+				c2sErr <- fmt.Errorf("recv from client: %w", err)
 				return
 			}
 			p.logger.Debug("Received frame from client", zap.Int("payload_size", len(frame.payload)))
 
 			if err := clientStream.SendMsg(frame); err != nil {
+				if err == io.EOF {
+					// The backend ended the stream; its status arrives via RecvMsg
+					// in the server->client goroutine.
+					c2sErr <- nil
+					return
+				}
 				p.logger.Error("Error sending to backend", zap.Error(err))
-				errChan <- fmt.Errorf("send to backend: %w", err)
+				c2sErr <- fmt.Errorf("send to backend: %w", err)
 				return
 			}
 		}
@@ -314,48 +332,57 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		p.logger.Debug("Started server->client forwarding goroutine")
 		defer p.logger.Debug("Exiting server->client forwarding goroutine")
 
+		// Header blocks until the backend sends headers. It returns nil when the
+		// backend ended without any (trailers-only); the status and trailer then
+		// carry everything, so nothing is set and the reply keeps that shape.
+		if md, _ := clientStream.Header(); md != nil {
+			_ = stream.SetHeader(md)
+		}
+
 		for {
 			frame := &rawFrame{}
 			if err := clientStream.RecvMsg(frame); err != nil {
+				stream.SetTrailer(clientStream.Trailer())
 				if err == io.EOF {
 					p.logger.Debug("Received EOF from backend")
-					errChan <- nil
+					s2cErr <- nil
 					return
 				}
-				p.logger.Error("Error receiving from backend", zap.Error(err))
-				errChan <- fmt.Errorf("recv from backend: %w", err)
+				// A backend status is a normal reply relayed as-is, not a proxy failure.
+				p.logger.Debug("Backend returned status", zap.Error(err))
+				// Returned unwrapped: wrapping keeps the code but rewrites the
+				// message the client sees.
+				s2cErr <- err
 				return
 			}
 			p.logger.Debug("Received frame from backend", zap.Int("payload_size", len(frame.payload)))
 
 			if err := stream.SendMsg(frame); err != nil {
 				p.logger.Error("Error sending to client", zap.Error(err))
-				errChan <- fmt.Errorf("send to client: %w", err)
+				s2cErr <- fmt.Errorf("send to client: %w", err)
 				return
 			}
 		}
 	}()
 
 	// Wait for completion
-	// For normal completion (EOF on both sides), wait for both goroutines
-	// For errors, return immediately on first error
 	var proxyErr error
-	err1 := <-errChan
-	if err1 != nil {
-		// Got an error (not EOF), return immediately
-		p.logger.Debug("First goroutine returned error, exiting immediately", zap.Error(err1))
-		proxyErr = err1
-	} else {
-		// First goroutine completed normally (EOF), wait for second
-		p.logger.Debug("First goroutine completed normally, waiting for second...")
-		err2 := <-errChan
-		if err2 != nil {
-			p.logger.Debug("Second goroutine returned error", zap.Error(err2))
-			proxyErr = err2
+	select {
+	case proxyErr = <-s2cErr:
+		// The backend finished (or the client went away): the call is over.
+	case err := <-c2sErr:
+		if err == nil {
+			// Client half-closed, or the backend ended mid-send: its status follows.
+			proxyErr = <-s2cErr
 		} else {
-			p.logger.Debug("Both goroutines completed normally")
+			// Not waiting for the server->client goroutine: it may be blocked
+			// sending to a client that stopped reading, and only returning (which
+			// ends the server stream) unblocks it.
+			p.logger.Debug("Client side failed, ending call", zap.Error(err))
+			proxyErr = err
 		}
 	}
+	cancel()
 
 	// Record metrics
 	duration := time.Since(start)
@@ -373,10 +400,19 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 
 	if proxyErr != nil {
 		metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", statusStr, "proxy_error").Inc()
-		p.logger.Error("gRPC proxy error",
-			zap.String("method", method),
-			zap.Error(proxyErr),
-		)
+		// A backend status is relayed unwrapped and is a normal per-request reply
+		// (e.g. NotFound); only failures of the proxy itself are logged as errors.
+		if _, fromBackend := proxyErr.(interface{ GRPCStatus() *status.Status }); fromBackend {
+			p.logger.Debug("gRPC backend status relayed",
+				zap.String("method", method),
+				zap.Error(proxyErr),
+			)
+		} else {
+			p.logger.Error("gRPC proxy error",
+				zap.String("method", method),
+				zap.Error(proxyErr),
+			)
+		}
 
 		// Track 5xx-equivalent gRPC errors for external endpoints
 		// gRPC codes that map to 5xx: Internal(13), Unavailable(14), DataLoss(15), Unknown(2)
