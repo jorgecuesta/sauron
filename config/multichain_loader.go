@@ -23,18 +23,48 @@ type MultiChainLoader struct {
 func NewMultiChainLoader(configPath string, logger *zap.Logger) (*MultiChainLoader, error) {
 	l := &MultiChainLoader{
 		logger: logger,
-		v:      viper.New(),
+		v:      newConfigViper(configPath),
 	}
-
-	l.v.SetConfigFile(configPath)
-	l.v.SetConfigType("yaml")
 
 	if err := l.v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
 
+	cfg, err := parseMultiChain(l.v)
+	if err != nil {
+		return nil, err
+	}
+
+	l.config.Store(cfg)
+	logger.Info("Multi-chain configuration loaded",
+		zap.String("path", configPath),
+		zap.Int("networks", len(cfg.Networks)),
+		zap.Int("internal_nodes", len(cfg.Internals)),
+		zap.Int("external_rings", len(cfg.Externals)),
+		zap.Int("users", len(cfg.Users)),
+	)
+
+	// Register the callback before starting the watcher: the watcher goroutine
+	// reads it, so setting it afterwards is a data race.
+	l.v.OnConfigChange(l.onConfigChange)
+	l.v.WatchConfig()
+
+	return l, nil
+}
+
+// newConfigViper returns a viper instance bound to the YAML file at path.
+func newConfigViper(path string) *viper.Viper {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+	return v
+}
+
+// parseMultiChain decodes, validates and defaults the config held by v. Every
+// load path goes through it so they all decode the same way.
+func parseMultiChain(v *viper.Viper) (*MultiChainConfig, error) {
 	var cfg MultiChainConfig
-	if err := l.v.Unmarshal(&cfg, viper.DecodeHook(
+	if err := v.Unmarshal(&cfg, viper.DecodeHook(
 		mapstructure.ComposeDecodeHookFunc(
 			mapstructure.StringToTimeDurationHookFunc(),
 			mapstructure.StringToSliceHookFunc(","),
@@ -49,45 +79,45 @@ func NewMultiChainLoader(configPath string, logger *zap.Logger) (*MultiChainLoad
 	}
 
 	applyMultiChainDefaults(&cfg)
-
-	l.config.Store(&cfg)
-	logger.Info("Multi-chain configuration loaded",
-		zap.String("path", configPath),
-		zap.Int("networks", len(cfg.Networks)),
-		zap.Int("internal_nodes", len(cfg.Internals)),
-		zap.Int("external_rings", len(cfg.Externals)),
-		zap.Int("users", len(cfg.Users)),
-	)
-
-	l.v.WatchConfig()
-	l.v.OnConfigChange(l.onConfigChange)
-
-	return l, nil
+	return &cfg, nil
 }
 
 func (l *MultiChainLoader) onConfigChange(e fsnotify.Event) {
 	l.logger.Info("Configuration file changed, reloading...", zap.String("event", e.String()))
 
-	var newCfg MultiChainConfig
-	if err := l.v.Unmarshal(&newCfg, viper.DecodeHook(permissionsDecodeHook())); err != nil {
-		l.logger.Error("Failed to unmarshal new config", zap.Error(err))
+	cfg, err := parseMultiChain(l.v)
+	if err != nil {
+		l.logger.Error("Failed to reload changed config; keeping previous configuration", zap.Error(err))
 		return
 	}
+	l.store(cfg)
+}
 
-	if err := ValidateMultiChain(&newCfg); err != nil {
-		l.logger.Error("Invalid new configuration", zap.Error(err))
-		return
+// Reload re-reads the config file and swaps it in if it is valid; on any error
+// the current config stays. It reads through its own viper instance, so it is
+// safe alongside the file watcher and other Reload calls.
+func (l *MultiChainLoader) Reload() error {
+	v := newConfigViper(l.v.ConfigFileUsed())
+	if err := v.ReadInConfig(); err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
 	}
 
-	applyMultiChainDefaults(&newCfg)
+	cfg, err := parseMultiChain(v)
+	if err != nil {
+		return err
+	}
+	l.store(cfg)
+	return nil
+}
 
-	l.config.Store(&newCfg)
-
+// store swaps in cfg and logs the reload.
+func (l *MultiChainLoader) store(cfg *MultiChainConfig) {
+	l.config.Store(cfg)
 	l.logger.Info("Configuration reloaded successfully",
-		zap.Int("networks", len(newCfg.Networks)),
-		zap.Int("internal_nodes", len(newCfg.Internals)),
-		zap.Int("external_rings", len(newCfg.Externals)),
-		zap.Int("users", len(newCfg.Users)),
+		zap.Int("networks", len(cfg.Networks)),
+		zap.Int("internal_nodes", len(cfg.Internals)),
+		zap.Int("external_rings", len(cfg.Externals)),
+		zap.Int("users", len(cfg.Users)),
 	)
 }
 

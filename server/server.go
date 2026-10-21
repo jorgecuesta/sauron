@@ -367,19 +367,37 @@ func (s *Server) startGRPCProxy(networkName, listenAddr string) {
 }
 
 // WaitForShutdown waits for a shutdown signal or a fatal error from a background
-// goroutine, then performs graceful shutdown.
+// goroutine, then performs graceful shutdown. SIGHUP reloads the configuration
+// instead; without registering it, Go's default action would kill the process.
 func (s *Server) WaitForShutdown() {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
 
-	select {
-	case sig := <-sigCh:
-		s.logger.Info("Shutdown signal received", zap.String("signal", sig.String()))
-	case err := <-s.errCh:
-		s.logger.Error("Fatal error in background goroutine, initiating shutdown", zap.Error(err))
-	}
-
+	s.waitForSignals(sigCh)
 	s.Shutdown()
+}
+
+// waitForSignals handles SIGHUP as a config reload and returns on any other
+// signal or on a fatal background error.
+func (s *Server) waitForSignals(sigCh <-chan os.Signal) {
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == syscall.SIGHUP {
+				s.logger.Info("SIGHUP received, reloading configuration")
+				if err := s.configLoader.Reload(); err != nil {
+					s.logger.Error("Configuration reload on SIGHUP failed; keeping previous configuration", zap.Error(err))
+				}
+				continue
+			}
+			s.logger.Info("Shutdown signal received", zap.String("signal", sig.String()))
+			return
+		case err := <-s.errCh:
+			s.logger.Error("Fatal error in background goroutine, initiating shutdown", zap.Error(err))
+			return
+		}
+	}
 }
 
 // Shutdown performs graceful shutdown
