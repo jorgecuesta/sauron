@@ -128,24 +128,67 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 	)
 
 	// Bidirectional copy: use the buffered readers (clientBuf, backendBuf)
-	// so bytes already read during handshake are not lost.
-	errChan := make(chan error, 2)
+	// so bytes already read during handshake are not lost. Each direction
+	// records whether it failed on the client's connection, so a client that
+	// drops off is not reported as a backend failure.
+	errChan := make(chan wsCopyResult, 2)
 
 	go func() {
-		n, copyErr := io.Copy(backendConn, clientBuf)
+		src := &clientReadRecorder{r: clientBuf}
+		n, copyErr := io.Copy(backendConn, src)
 		logger.Debug("Client->Backend copy finished", zap.Int64("bytes", n), zap.Error(copyErr))
-		errChan <- copyErr
+		errChan <- wsCopyResult{err: copyErr, clientSide: src.err != nil}
 	}()
 	go func() {
-		n, copyErr := io.Copy(clientConn, backendBuf)
+		dst := &clientWriteRecorder{w: clientConn}
+		n, copyErr := io.Copy(dst, backendBuf)
 		logger.Debug("Backend->Client copy finished", zap.Int64("bytes", n), zap.Error(copyErr))
-		errChan <- copyErr
+		errChan <- wsCopyResult{err: copyErr, clientSide: dst.err != nil}
 	}()
 
 	// Wait for one direction to finish.
-	copyErr := <-errChan
-	if copyErr != nil && copyErr != io.EOF {
-		return resp.StatusCode, &WSProxyError{Category: "websocket_error", StatusCode: resp.StatusCode, Err: copyErr}
+	res := <-errChan
+	if res.err != nil && res.err != io.EOF {
+		category := "websocket_error"
+		if res.clientSide {
+			category = "client_disconnect"
+		}
+		return resp.StatusCode, &WSProxyError{Category: category, StatusCode: resp.StatusCode, Err: res.err}
 	}
 	return resp.StatusCode, nil
+}
+
+// wsCopyResult is how one copy direction ended; clientSide is true when it
+// failed reading from or writing to the client's connection.
+type wsCopyResult struct {
+	err        error
+	clientSide bool
+}
+
+// clientReadRecorder records a non-EOF error from reading the client.
+type clientReadRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (c *clientReadRecorder) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if err != nil && err != io.EOF {
+		c.err = err
+	}
+	return n, err
+}
+
+// clientWriteRecorder records an error from writing to the client.
+type clientWriteRecorder struct {
+	w   io.Writer
+	err error
+}
+
+func (c *clientWriteRecorder) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if err != nil {
+		c.err = err
+	}
+	return n, err
 }
