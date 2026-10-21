@@ -1,11 +1,14 @@
 package config
 
 import (
+	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
@@ -13,7 +16,7 @@ import (
 // decode hook: durations, a new node and the "permissions: all" shorthand.
 const reloadedYAML = `
 listen: ":3000"
-auth: true
+auth: false
 
 timeouts:
   health_check: 7s
@@ -71,8 +74,8 @@ func assertReloaded(t *testing.T, cfg *MultiChainConfig) {
 	if len(cfg.Internals) != 2 || cfg.Internals[1].Name != "seed-two" {
 		t.Errorf("Internals = %+v, want seed-one and seed-two", cfg.Internals)
 	}
-	if !cfg.Auth || len(cfg.Users) != 1 || !cfg.Users[0].Permissions.All {
-		t.Errorf("Auth/Users = %v/%+v, want auth with one user with permissions all", cfg.Auth, cfg.Users)
+	if len(cfg.Users) != 1 || !cfg.Users[0].Permissions.All {
+		t.Errorf("Users = %+v, want one user with permissions all", cfg.Users)
 	}
 	if cfg.GRPCKeepalive.Time != 600*time.Second {
 		t.Errorf("defaults not applied: GRPCKeepalive.Time = %s", cfg.GRPCKeepalive.Time)
@@ -214,4 +217,132 @@ func TestMultiChainLoader_Reload_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// newUnwatchedLoader builds a loader for path without starting the file
+// watcher, so a test can drive onConfigChange itself, deterministically.
+func newUnwatchedLoader(t *testing.T, path string) *MultiChainLoader {
+	t.Helper()
+	l := &MultiChainLoader{logger: zap.NewNop(), v: newConfigViper(path), path: path}
+	if err := l.v.ReadInConfig(); err != nil {
+		t.Fatalf("ReadInConfig: %v", err)
+	}
+	cfg, err := parseMultiChain(l.v)
+	if err != nil {
+		t.Fatalf("parseMultiChain: %v", err)
+	}
+	l.config.Store(cfg)
+	return l
+}
+
+func withHealthCheck(yaml, d string) string {
+	return strings.Replace(yaml, "health_check: 7s", "health_check: "+d, 1)
+}
+
+// TestMultiChainLoader_LateWatcherEventDoesNotRestoreOlderFile: the watcher's
+// viper read the file at v2, then the file moved to v3 and SIGHUP reloaded v3.
+// When the watcher's callback finally runs it must not put v2 back.
+func TestMultiChainLoader_LateWatcherEventDoesNotRestoreOlderFile(t *testing.T) {
+	t.Parallel()
+
+	path := writeTestConfig(t, validMultiChainYAML)
+	l := newUnwatchedLoader(t, path)
+
+	rewriteConfig(t, path, withHealthCheck(reloadedYAML, "7s")) // v2
+	if err := l.v.ReadInConfig(); err != nil {                  // what the watcher saw
+		t.Fatalf("ReadInConfig v2: %v", err)
+	}
+	rewriteConfig(t, path, withHealthCheck(reloadedYAML, "9s")) // v3
+	if err := l.Reload(); err != nil {
+		t.Fatalf("Reload v3: %v", err)
+	}
+
+	l.onConfigChange(fsnotify.Event{Name: path, Op: fsnotify.Write}) // the late v2 event
+
+	if got := l.Get().Timeouts.HealthCheck; got != 9*time.Second {
+		t.Errorf("HealthCheck = %s, want 9s from the newest file", got)
+	}
+}
+
+// TestMultiChainLoader_Reload_RejectsRestartOnlyChanges: fields the server
+// only reads at startup (listeners, auth wiring, rate limiter, redis) cannot
+// change at runtime. A reload that changes them is rejected with
+// ErrRestartRequired and the running config stays, on both reload paths.
+func TestMultiChainLoader_Reload_RejectsRestartOnlyChanges(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{name: "status listen", mutate: func(y string) string { return strings.Replace(y, `listen: ":3000"`, `listen: ":3001"`, 1) }},
+		{name: "auth toggled", mutate: func(y string) string { return strings.Replace(y, "auth: false", "auth: true", 1) }},
+		{name: "proxy endpoint listen", mutate: func(y string) string { return strings.Replace(y, `listen: ":8081"`, `listen: ":9081"`, 1) }},
+		{name: "endpoint added", mutate: func(y string) string {
+			return strings.Replace(y, "      - protocol: rest\n        listen: \":8080\"", "      - protocol: rest\n        listen: \":8080\"\n      - protocol: grpc\n        listen: \":8082\"", 1)
+		}},
+		{name: "network renamed", mutate: func(y string) string { return strings.ReplaceAll(y, "pocket", "pocket2") }},
+		{name: "rate limit enabled", mutate: func(y string) string {
+			return strings.Replace(y, "auth: false\n", "auth: false\nrate_limit:\n  enabled: true\n  requests_per_second: 10\n  burst: 20\n", 1)
+		}},
+		{name: "redis enabled", mutate: func(y string) string {
+			return strings.Replace(y, "auth: false\n", "auth: false\nredis:\n  enabled: true\n  uri: \"redis://localhost:6379\"\n", 1)
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			changed := tc.mutate(reloadedYAML)
+			if changed == reloadedYAML {
+				t.Fatal("mutation did not change the config; fix the test")
+			}
+
+			// SIGHUP path.
+			path := writeTestConfig(t, reloadedYAML)
+			l := newUnwatchedLoader(t, path)
+			before := l.Get()
+			rewriteConfig(t, path, changed)
+			err := l.Reload()
+			if !errors.Is(err, ErrRestartRequired) {
+				t.Errorf("Reload err = %v, want ErrRestartRequired", err)
+			}
+			if l.Get() != before {
+				t.Error("Reload swapped in a config that needs a restart")
+			}
+
+			// File-watcher path.
+			l.onConfigChange(fsnotify.Event{Name: path, Op: fsnotify.Write})
+			if l.Get() != before {
+				t.Error("watcher swapped in a config that needs a restart")
+			}
+		})
+	}
+}
+
+// TestMultiChainLoader_Reload_AllowsRuntimeChanges: nodes, timeouts, height
+// check intervals and users change at runtime without a restart.
+func TestMultiChainLoader_Reload_AllowsRuntimeChanges(t *testing.T) {
+	t.Parallel()
+
+	path := writeTestConfig(t, reloadedYAML)
+	l := newUnwatchedLoader(t, path)
+
+	changed := strings.Replace(withHealthCheck(reloadedYAML, "3s"), "interval: 10s", "interval: 20s", 1)
+	changed = strings.Replace(changed, `      rpc: "http://seed-two:26657"`, `      rpc: "http://seed-two-new:26657"`, 1)
+	rewriteConfig(t, path, changed)
+	if err := l.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	cfg := l.Get()
+	if cfg.Timeouts.HealthCheck != 3*time.Second {
+		t.Errorf("HealthCheck = %s, want 3s", cfg.Timeouts.HealthCheck)
+	}
+	if got := cfg.Networks[0].HeightCheck.Interval; got != 20*time.Second {
+		t.Errorf("HeightCheck.Interval = %s, want 20s", got)
+	}
+	if got := cfg.Internals[1].Endpoints["rpc"]; got != "http://seed-two-new:26657" {
+		t.Errorf("seed-two rpc = %q, want the new URL", got)
+	}
 }
