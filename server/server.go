@@ -372,9 +372,11 @@ func (s *Server) startGRPCProxy(networkName, listenAddr string) {
 func (s *Server) WaitForShutdown() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
 
 	s.waitForSignals(sigCh)
+	// Stop catching signals before the (up to 30s) graceful shutdown, so a
+	// second SIGTERM/SIGINT takes Go's default action and exits at once.
+	signal.Stop(sigCh)
 	s.Shutdown()
 }
 
