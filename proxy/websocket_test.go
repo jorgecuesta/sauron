@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -141,7 +142,9 @@ func TestProxyWebSocket_BackendUnreachable(t *testing.T) {
 func TestProxyWebSocket_HappyPath(t *testing.T) {
 	t.Parallel()
 
-	// Echo WebSocket server: reads one message, echoes it back.
+	// Echo WebSocket server: echoes every message until the client closes.
+	// Closing right after the first echo raced the client's close frame: the
+	// proxy then wrote into a socket the backend had already reset.
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	echoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -149,11 +152,15 @@ func TestProxyWebSocket_HappyPath(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		mt, msg, err := conn.ReadMessage()
-		if err != nil {
-			return
+		for {
+			mt, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := conn.WriteMessage(mt, msg); err != nil {
+				return
+			}
 		}
-		_ = conn.WriteMessage(mt, msg)
 	}))
 	defer echoServer.Close()
 
@@ -193,8 +200,16 @@ func TestProxyWebSocket_HappyPath(t *testing.T) {
 		t.Errorf("echo mismatch: got %q, want %q", string(gotMsg), sentMsg)
 	}
 
-	// Close and wait for proxy to finish.
+	// Close cleanly and wait for proxy to finish: send the close frame and wait
+	// for the peer's close reply before dropping TCP. Closing the socket right
+	// after the frame resets the connection under the proxy's read.
 	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			break
+		}
+	}
 	_ = conn.Close()
 
 	res := <-resultCh
