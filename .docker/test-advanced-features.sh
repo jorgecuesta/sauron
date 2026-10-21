@@ -439,7 +439,7 @@ print_test "Test status endpoint with valid authentication"
 STATUS=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:3000/pocket/status)
 print_info "Status response: ${STATUS:0:150}"
 
-if echo "$STATUS" | grep -qE '(height|api|rpc|grpc)'; then
+if echo "$STATUS" | jq -e '.height > 0 and (.endpoints | has("rest") and has("rpc") and has("grpc"))' >/dev/null 2>&1; then
     print_pass "Status endpoint returned valid response with auth"
 else
     print_fail "Status endpoint failed with valid auth"

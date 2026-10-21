@@ -256,7 +256,7 @@ fi
 # Test 7: Verify endpoint types
 print_header "Test 7: Endpoint Type Coverage"
 
-for TYPE in api rpc grpc; do
+for TYPE in rest rpc grpc; do
     run_test
     print_test "Checking $TYPE endpoint validation"
 
