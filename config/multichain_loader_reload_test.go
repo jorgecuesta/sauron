@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"sauron/metrics"
+
 	"github.com/fsnotify/fsnotify"
+	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 )
 
@@ -344,5 +347,125 @@ func TestMultiChainLoader_Reload_AllowsRuntimeChanges(t *testing.T) {
 	}
 	if got := cfg.Internals[1].Endpoints["rpc"]; got != "http://seed-two-new:26657" {
 		t.Errorf("seed-two rpc = %q, want the new URL", got)
+	}
+}
+
+const twoNetworksYAML = `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rpc
+        listen: ":8081"
+      - protocol: rest
+        listen: ":8080"
+  - name: eth
+    type: evm
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9080"
+internals:
+  - name: seed-one
+    network: pocket
+    endpoints:
+      rpc: "http://seed-one:26657"
+      rest: "http://seed-one:1317"
+  - name: geth
+    network: eth
+    endpoints:
+      jsonrpc: "http://geth:8545"
+`
+
+// twoNetworksReordered lists the same networks and endpoints in another order
+// and moves geth to a new URL, which is a runtime change.
+const twoNetworksReordered = `
+listen: ":3000"
+timeouts:
+  health_check: 5s
+  proxy: 60s
+networks:
+  - name: eth
+    type: evm
+    endpoints:
+      - protocol: jsonrpc
+        listen: ":9080"
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+      - protocol: rpc
+        listen: ":8081"
+internals:
+  - name: seed-one
+    network: pocket
+    endpoints:
+      rpc: "http://seed-one:26657"
+      rest: "http://seed-one:1317"
+  - name: geth
+    network: eth
+    endpoints:
+      jsonrpc: "http://geth-new:8545"
+`
+
+// TestMultiChainLoader_Reload_ReorderIsNotARestartChange: listing the same
+// networks and endpoints in another order changes no listener, so it must not
+// block the runtime change that comes with it.
+func TestMultiChainLoader_Reload_ReorderIsNotARestartChange(t *testing.T) {
+	t.Parallel()
+
+	path := writeTestConfig(t, twoNetworksYAML)
+	l := newUnwatchedLoader(t, path)
+
+	rewriteConfig(t, path, twoNetworksReordered)
+	if err := l.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	var geth string
+	for _, n := range l.Get().Internals {
+		if n.Name == "geth" {
+			geth = n.Endpoints["jsonrpc"]
+		}
+	}
+	if geth != "http://geth-new:8545" {
+		t.Errorf("geth jsonrpc = %q, want the new URL", geth)
+	}
+}
+
+// configReloadOK reads the reload-health gauge.
+func configReloadOK(t *testing.T) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := metrics.ConfigReloadOK.Write(&m); err != nil {
+		t.Fatalf("read ConfigReloadOK: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
+// TestMultiChainLoader_ReloadOKGauge: a rejected reload leaves the running
+// config different from the file, which must be visible to alerting, not only
+// in a log line. Not parallel: the gauge is global.
+func TestMultiChainLoader_ReloadOKGauge(t *testing.T) {
+	path := writeTestConfig(t, reloadedYAML)
+	l := newUnwatchedLoader(t, path)
+
+	rewriteConfig(t, path, "networks: [broken")
+	if err := l.Reload(); err == nil {
+		t.Fatal("Reload of a broken file: want error")
+	}
+	if got := configReloadOK(t); got != 0 {
+		t.Errorf("after a failed reload ConfigReloadOK = %v, want 0", got)
+	}
+
+	rewriteConfig(t, path, reloadedYAML)
+	if err := l.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := configReloadOK(t); got != 1 {
+		t.Errorf("after a good reload ConfigReloadOK = %v, want 1", got)
 	}
 }

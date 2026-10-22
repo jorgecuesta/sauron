@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"sauron/metrics"
+
 	"github.com/fsnotify/fsnotify"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
@@ -45,6 +47,7 @@ func NewMultiChainLoader(configPath string, logger *zap.Logger) (*MultiChainLoad
 	}
 
 	l.config.Store(cfg)
+	metrics.ConfigReloadOK.Set(1)
 	logger.Info("Multi-chain configuration loaded",
 		zap.String("path", configPath),
 		zap.Int("networks", len(cfg.Networks)),
@@ -110,6 +113,15 @@ func (l *MultiChainLoader) Reload() error {
 	l.reloadMu.Lock()
 	defer l.reloadMu.Unlock()
 
+	if err := l.reload(); err != nil {
+		metrics.ConfigReloadOK.Set(0)
+		return err
+	}
+	metrics.ConfigReloadOK.Set(1)
+	return nil
+}
+
+func (l *MultiChainLoader) reload() error {
 	v := newConfigViper(l.path)
 	if err := v.ReadInConfig(); err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
@@ -143,17 +155,26 @@ func restartOnlyChange(old, new *MultiChainConfig) string {
 	case len(old.Networks) != len(new.Networks):
 		return "networks"
 	}
-	for i := range old.Networks {
-		o, n := old.Networks[i], new.Networks[i]
-		if o.Name != n.Name || o.Type != n.Type || len(o.Endpoints) != len(n.Endpoints) {
+	// Matched by name and protocol: reordering the YAML changes no listener.
+	oldNets := make(map[string]MultiChainNetwork, len(old.Networks))
+	for _, n := range old.Networks {
+		oldNets[n.Name] = n
+	}
+	for _, n := range new.Networks {
+		o, ok := oldNets[n.Name]
+		if !ok || o.Type != n.Type || len(o.Endpoints) != len(n.Endpoints) {
 			return "networks"
 		}
-		for j := range o.Endpoints {
-			oe, ne := o.Endpoints[j], n.Endpoints[j]
+		oldEps := make(map[string]NetworkEndpoint, len(o.Endpoints))
+		for _, ep := range o.Endpoints {
+			oldEps[ep.Protocol] = ep
+		}
+		for _, ne := range n.Endpoints {
+			oe, ok := oldEps[ne.Protocol]
 			// Advertise is read per request, so it may change at runtime.
 			oe.Advertise, ne.Advertise = "", ""
-			if oe != ne {
-				return "networks[" + o.Name + "].endpoints"
+			if !ok || oe != ne {
+				return "networks[" + n.Name + "].endpoints"
 			}
 		}
 	}
