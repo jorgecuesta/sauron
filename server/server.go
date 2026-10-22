@@ -17,6 +17,7 @@ import (
 	"sauron/adapter/solana"
 	"sauron/checker"
 	"sauron/config"
+	"sauron/metrics"
 	"sauron/proxy"
 	"sauron/selector"
 	"sauron/status"
@@ -275,12 +276,83 @@ func (s *Server) Start() error {
 		return err
 	}
 
+	// After the proxies exist: reconcile reads s.grpcProxies.
+	s.watchConfig()
+
 	s.logger.Info("Sauron is fully operational - The tower stands",
 		zap.String("status_listen", cfg.Listen),
 		zap.Int("networks", len(cfg.Networks)),
 	)
 
 	return nil
+}
+
+// watchConfig makes every applied reload drop the state of nodes and
+// externals the new config no longer has. A check already running when the
+// reload lands can still write a removed node back, so the reconciliation runs
+// again once the health-check timeout has passed and no such check can be left.
+func (s *Server) watchConfig() {
+	s.configLoader.OnReload(func(cfg *config.MultiChainConfig) {
+		s.reconcile(cfg)
+		time.AfterFunc(cfg.Timeouts.HealthCheck+time.Second, func() {
+			s.reconcile(s.configLoader.Get())
+		})
+	})
+}
+
+// reconcile drops what cfg no longer configures: removed internal nodes
+// (heights, health, archival status, breaker counts and their state metrics),
+// removed externals or rings (their endpoints and metrics), and pooled gRPC
+// connections to addresses nothing routes to any more (a removed node, or a
+// node whose gRPC URL changed). It is idempotent.
+func (s *Server) reconcile(cfg *config.MultiChainConfig) {
+	nodes := make(map[storage.NodeRef]bool, len(cfg.Internals))
+	grpcAddrs := make(map[string]bool)
+	for _, n := range cfg.Internals {
+		nodes[storage.NodeRef{Network: n.Network, Node: n.Name}] = true
+		if addr := n.Endpoints["grpc"]; addr != "" {
+			grpcAddrs[addr] = true
+		}
+	}
+	keepNode := func(network, node string) bool { return nodes[storage.NodeRef{Network: network, Node: node}] }
+
+	for _, ref := range s.store.RemoveNodes(keepNode) {
+		metrics.DeleteNodeSeries(ref.Network, ref.Node)
+		s.logger.Info("Forgot node removed from the config",
+			zap.String("network", ref.Network),
+			zap.String("node", ref.Node),
+		)
+	}
+	s.healthStore.RemoveNodes(keepNode)
+	if s.archivalStore != nil {
+		s.archivalStore.RemoveNodes(keepNode)
+	}
+	s.circuitBreaker.RemoveNodes(keepNode)
+
+	rings := make(map[string]bool)
+	for _, ext := range cfg.Externals {
+		for _, ring := range ext.Rings {
+			rings[ext.Name+"\x00"+ring] = true
+		}
+	}
+	removedByExternal := make(map[string][]string)
+	for _, ep := range s.endpointStore.RemoveExternals(func(name, ring string) bool { return rings[name+"\x00"+ring] }) {
+		removedByExternal[ep.ExternalName] = append(removedByExternal[ep.ExternalName], ep.URL)
+	}
+	for name, urls := range removedByExternal {
+		metrics.DeleteExternalSeries(name, urls)
+		s.logger.Info("Forgot external endpoints removed from the config",
+			zap.String("external", name),
+			zap.Int("endpoints", len(urls)),
+		)
+	}
+
+	externalGRPC := s.endpointStore.URLs("grpc")
+	keepAddr := func(addr string) bool { return grpcAddrs[addr] || externalGRPC[addr] }
+	for _, p := range s.grpcProxies {
+		p.CloseConnectionsExcept(keepAddr)
+	}
+	s.scheduler.CloseExternalConnectionsExcept(func(url string) bool { return externalGRPC[url] })
 }
 
 // startStatusServer starts the status API server
