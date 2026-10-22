@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,6 +110,10 @@ func (n *Node) RESTHandler() http.Handler {
 			"height": strconv.FormatInt(n.Height(), 10),
 		}}})
 	})
+	// /slow answers only when the client gives up (client-disconnect tests).
+	mux.HandleFunc("GET /slow", func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
 	return n.guard(mux)
 }
 
@@ -161,11 +166,15 @@ func (n *Node) RPCHandler() http.Handler {
 			"error": map[string]any{"code": -32601, "message": "Method not found"}})
 	})
 	mux.HandleFunc("GET /websocket", n.serveWS)
+	// /slow answers only when the client gives up (client-disconnect tests).
+	mux.HandleFunc("GET /slow", func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
 	return n.guard(mux)
 }
 
 func (n *Node) serveWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, http.Header{"X-Fake-Node": {n.name}})
 	if err != nil {
 		return
 	}
@@ -307,11 +316,29 @@ func (n *Node) NewGRPCServer() *grpc.Server {
 			)); err != nil {
 				return err
 			}
+			// The method name selects a behaviour for pipeline tests.
+			method, _ := grpc.MethodFromServerStream(stream)
+			switch {
+			case strings.HasSuffix(method, "/NotFound"):
+				return status.Error(codes.NotFound, "not found")
+			case strings.HasSuffix(method, "/Slow"):
+				<-stream.Context().Done()
+				return stream.Context().Err()
+			}
 			out := make([]byte, 8)
 			for i := range out {
 				out[i] = byte(h >> (8 * (7 - i)))
 			}
-			return stream.SendMsg(&out)
+			sends := 1
+			if strings.HasSuffix(method, "/Stream") {
+				sends = 3
+			}
+			for i := 0; i < sends; i++ {
+				if err := stream.SendMsg(&out); err != nil {
+					return err
+				}
+			}
+			return nil
 		}),
 	)
 }

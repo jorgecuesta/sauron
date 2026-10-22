@@ -509,3 +509,107 @@ func TestRPCAbciInfo(t *testing.T) {
 		t.Errorf("failed node /abci_info status = %d, want 503", resp.StatusCode)
 	}
 }
+
+// gRPC behaviours selected by the method name, for pipeline tests: a method
+// ending in /Stream sends three messages, /NotFound fails with NotFound (an
+// answer about the request, not a node failure), /Slow answers only when the
+// client gives up.
+func TestGRPCMethodBehaviours(t *testing.T) {
+	e := startEnv(t, time.Hour)
+	cc, err := grpc.NewClient(e.grpc, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(rawClientCodec{})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cc.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stream, err := cc.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, "/fake.Service/Stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SendMsg([]byte("req")); err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.CloseSend()
+	msgs := 0
+	for {
+		var out []byte
+		if err := stream.RecvMsg(&out); err != nil {
+			if err != io.EOF {
+				t.Fatalf("stream ended with %v after %d messages", err, msgs)
+			}
+			break
+		}
+		msgs++
+	}
+	if msgs != 3 {
+		t.Errorf("stream sent %d messages, want 3", msgs)
+	}
+	if hdr, _ := stream.Header(); len(hdr.Get("x-fake-node")) != 1 {
+		t.Errorf("stream header = %v, want x-fake-node", hdr)
+	}
+
+	var out []byte
+	var hdr metadata.MD
+	err = cc.Invoke(ctx, "/fake.Service/NotFound", []byte("req"), &out, grpc.Header(&hdr))
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("NotFound method: %v, want NotFound", err)
+	}
+	if got := hdr.Get("x-fake-node"); len(got) != 1 || got[0] != "n1" {
+		t.Errorf("NotFound header = %v, want x-fake-node n1", hdr)
+	}
+
+	slowCtx, slowCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer slowCancel()
+	start := time.Now()
+	err = cc.Invoke(slowCtx, "/fake.Service/Slow", []byte("req"), &out)
+	if status.Code(err) != codes.DeadlineExceeded || time.Since(start) < 150*time.Millisecond {
+		t.Errorf("Slow method: %v after %v, want DeadlineExceeded at the client's deadline", err, time.Since(start))
+	}
+}
+
+// GET /slow on the REST port answers only when the client gives up.
+func TestRESTSlow(t *testing.T) {
+	e := startEnv(t, time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+e.rest+"/slow", nil)
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("/slow answered %d before the client gave up", resp.StatusCode)
+	}
+	if time.Since(start) < 150*time.Millisecond {
+		t.Errorf("/slow returned after %v, before the client's deadline", time.Since(start))
+	}
+}
+
+// The WebSocket upgrade response names the node, so a test can tell which
+// node a proxied subscription reached.
+func TestWSUpgradeNamesNode(t *testing.T) {
+	e := startEnv(t, time.Hour)
+	c, resp, err := dialWS(t, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if got := resp.Header.Get("X-Fake-Node"); got != "n1" {
+		t.Errorf("upgrade response X-Fake-Node = %q, want n1", got)
+	}
+}
+
+// GET /slow on the RPC port also waits for the client to give up.
+func TestRPCSlow(t *testing.T) {
+	e := startEnv(t, time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+e.rpc+"/slow", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("RPC /slow answered %d before the client gave up", resp.StatusCode)
+	}
+}
