@@ -40,7 +40,7 @@ metric_sum() {
 # rest_node: which fake node served a REST request through Sauron ("" on non-200).
 rest_node() {
     curl -s -o /dev/null -D - --max-time 5 "http://localhost:${REST_PORT}/cosmos/base/tendermint/v1beta1/blocks/latest" |
-        awk 'BEGIN{IGNORECASE=1} /^HTTP\//{code=$2} /^x-fake-node:/{n=$2} END{if (code==200) print n}' | tr -d '\r'
+        tr -d '\r' | awk '{l=tolower($0)} l ~ /^http\//{code=$2} l ~ /^x-fake-node:/{n=$2} END{if (code==200) print n}'
 }
 
 smoke() {
