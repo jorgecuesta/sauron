@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Host ports (override to run while something else holds the defaults).
+PRIMARY_STATUS_PORT="${SAURON_PRIMARY_STATUS_PORT:-3000}"
+SECONDARY_STATUS_PORT="${SAURON_SECONDARY_STATUS_PORT:-4000}"
+PRIMARY_API_PORT="${SAURON_PRIMARY_API_PORT:-8080}"
+
 # Don't exit on error - we want to see what fails
 # set -e
 
@@ -150,7 +155,7 @@ TIMEOUT=60
 ELAPSED=0
 TRACKED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    TRACKED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    TRACKED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
     TRACKED=${TRACKED:-0}
     if [ "$TRACKED" -ge 3 ]; then
         break
@@ -173,7 +178,7 @@ print_test "Waiting for endpoints to be validated (max 60s)"
 ELAPSED=0
 VALIDATED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    VALIDATED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
     VALIDATED=${VALIDATED:-0}
     if [ "$VALIDATED" -ge 3 ]; then
         break
@@ -196,7 +201,7 @@ print_header "Test 6: Prometheus Metrics Verification"
 run_test
 print_test "Checking external endpoint tracking metrics"
 
-METRICS=$(curl -s http://localhost:3000/metrics | grep "sauron_external_endpoints_tracked")
+METRICS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep "sauron_external_endpoints_tracked")
 if echo "$METRICS" | grep -q "sauron_external_endpoints_tracked"; then
     print_pass "External endpoint tracking metrics found"
     echo ""
@@ -209,9 +214,9 @@ fi
 run_test
 print_test "Checking external endpoint validation metrics"
 
-TRACKED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-WORKING=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_working.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+TRACKED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+VALIDATED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+WORKING=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_working.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 
 TRACKED=${TRACKED:-0}
 VALIDATED=${VALIDATED:-0}
@@ -230,7 +235,7 @@ fi
 run_test
 print_test "Checking validation attempt counters"
 
-VALIDATION_ATTEMPTS=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_validation_attempts_total.*result="success"' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+VALIDATION_ATTEMPTS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_validation_attempts_total.*result="success"' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 
 print_info "Total successful validation attempts: $VALIDATION_ATTEMPTS"
 
@@ -243,7 +248,7 @@ fi
 run_test
 print_test "Checking error counts"
 
-ERROR_COUNT=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_error_count' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+ERROR_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_error_count' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 
 print_info "Total errors across all endpoints: $ERROR_COUNT"
 
@@ -260,7 +265,7 @@ for TYPE in rest rpc grpc; do
     run_test
     print_test "Checking $TYPE endpoint validation"
 
-    COUNT=$(curl -s http://localhost:3000/metrics | grep "sauron_external_endpoints_validated.*type=\"$TYPE\"" | grep -oE '[0-9]+$' | head -1)
+    COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep "sauron_external_endpoints_validated.*type=\"$TYPE\"" | grep -oE '[0-9]+$' | head -1)
     COUNT=${COUNT:-0}
 
     if [ "$COUNT" -ge 1 ]; then
@@ -276,7 +281,7 @@ print_header "Test 8: Health Check Endpoints"
 run_test
 print_test "Checking primary health endpoint"
 
-PRIMARY_HEALTH=$(curl -s http://localhost:3000/health)
+PRIMARY_HEALTH=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/health)
 if [ "$PRIMARY_HEALTH" = "OK" ]; then
     print_pass "Primary health endpoint responding"
 else
@@ -286,7 +291,7 @@ fi
 run_test
 print_test "Checking secondary health endpoint"
 
-SECONDARY_HEALTH=$(curl -s http://localhost:4000/health)
+SECONDARY_HEALTH=$(curl -s http://localhost:${SECONDARY_STATUS_PORT}/health)
 if [ "$SECONDARY_HEALTH" = "OK" ]; then
     print_pass "Secondary health endpoint responding"
 else
@@ -299,7 +304,7 @@ print_header "Test 9: Status API External Ring Information"
 run_test
 print_test "Checking if secondary status API advertises endpoints"
 
-STATUS=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:4000/pocket/status)
+STATUS=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:${SECONDARY_STATUS_PORT}/pocket/status)
 # V2 response format: {"height":N,"endpoints":{"rest":"...","rpc":"..."}}
 if echo "$STATUS" | grep -q '"height"' && echo "$STATUS" | grep -q '"endpoints"'; then
     print_pass "Secondary status API contains height and endpoints (V2 format)"
@@ -352,7 +357,7 @@ print_header "Test 12: Validation Latency Metrics"
 run_test
 print_test "Checking validation latency histogram"
 
-LATENCY_METRICS=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_validation_latency_seconds_count' | grep 'secondary-ring')
+LATENCY_METRICS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_validation_latency_seconds_count' | grep 'secondary-ring')
 
 if [ -n "$LATENCY_METRICS" ]; then
     print_pass "Validation latency metrics are being recorded"
