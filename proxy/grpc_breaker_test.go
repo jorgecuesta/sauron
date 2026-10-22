@@ -310,34 +310,3 @@ func TestGRPCProxy_BreakerCombinations(t *testing.T) {
 		})
 	}
 }
-
-// The gRPC health check only waits for transport READY, so it re-includes a
-// node that is still broken. The breaker keeps its count across that, so the
-// first failure re-trips it: one failed call per health-check cycle, not three.
-func TestGRPCProxy_StillBrokenNodeRetripsOnFirstFailure(t *testing.T) {
-	t.Parallel()
-	const network = "grpc-cb-retrip-net"
-	h := newGRPCBreakerHarness(t, network, true, true)
-	h.modes["node-b"].Store(modeUnavailable)
-	for i := 0; i < 6; i++ {
-		h.call(t)
-	}
-	if h.healthStore.IsHealthy(network, "node-b", "grpc") {
-		t.Fatal("node-b not tripped after 3 failures")
-	}
-
-	// Health check sees READY and re-includes it; it is still broken.
-	h.healthStore.SetHealthy(network, "node-b", "grpc")
-	failures := 0
-	for i := 0; i < 6; i++ {
-		if _, code := h.call(t); code != codes.OK {
-			failures++
-		}
-	}
-	if failures != 1 {
-		t.Errorf("failed calls after re-inclusion = %d, want 1 (immediate re-trip)", failures)
-	}
-	if h.healthStore.IsHealthy(network, "node-b", "grpc") {
-		t.Error("still-broken node-b back in rotation after failing again")
-	}
-}

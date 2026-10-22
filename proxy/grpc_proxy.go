@@ -38,11 +38,7 @@ func trackableBackendFailure(origin string, code codes.Code) bool {
 	if origin == originClient {
 		return false
 	}
-	switch code {
-	case codes.Internal, codes.Unavailable, codes.DataLoss, codes.Unknown:
-		return true
-	}
-	return false
+	return grpcutil.IsNodeFailure(code)
 }
 
 // callEnd is how one forwarding direction ended; err is nil on a clean end.

@@ -17,8 +17,11 @@ import (
 	"github.com/alitto/pond/v2"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 // MultiChainScheduler coordinates periodic health and height checks using the adapter engine.
@@ -291,6 +294,33 @@ func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode
 	})
 }
 
+// grpcHealthQueryMethod is the query the gRPC health check sends once the
+// transport is READY. Its request is empty and its answer is not decoded, so
+// it needs no proto types.
+const grpcHealthQueryMethod = "/cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
+
+// grpcHealthQuery marks the node by a real query: a READY transport says
+// nothing about whether the node answers. A node-failure status (the ones the
+// proxy's circuit breaker counts) or no answer within the check timeout is
+// unhealthy; any other answer, such as Unimplemented on a non-Cosmos chain,
+// proves the node serves.
+func (s *MultiChainScheduler) grpcHealthQuery(ctx context.Context, conn *grpc.ClientConn, node config.MultiChainNode, protocol string) {
+	// The answer is not decoded: only whether and how the node answered
+	// matters, and a local decoding error must not count as a node failure.
+	req, resp := []byte{}, []byte{}
+	err := conn.Invoke(ctx, grpcHealthQueryMethod, &req, &resp, grpc.ForceCodec(grpcutil.BytesCodec{}))
+	code := status.Code(err)
+	if grpcutil.IsNodeFailure(code) || code == codes.DeadlineExceeded {
+		s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, "gRPC health query: "+err.Error())
+		s.logger.Debug("gRPC health check: query failed",
+			zap.String("node", node.Name),
+			zap.String("code", code.String()),
+		)
+		return
+	}
+	s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+}
+
 // scheduleGRPCHealthCheck verifies that a gRPC endpoint is reachable by
 // dialing and waiting for the connection to reach the READY state.
 func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode, grpcAddr string, protocol string) {
@@ -324,7 +354,7 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 		for {
 			state := conn.GetState()
 			if state == connectivity.Ready {
-				s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+				s.grpcHealthQuery(ctx, conn, node, protocol)
 				return
 			}
 			if state == connectivity.TransientFailure || state == connectivity.Shutdown {
