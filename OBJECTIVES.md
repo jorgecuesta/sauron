@@ -57,3 +57,38 @@ All verified in code by a read-only audit; none measured at runtime.
 - **A node URL change leaks the old pooled gRPC connection** until shutdown (`GRPCProxy.connPool`, `ExternalChecker.grpcConnections`).
 - **Removed externals and rings stay routable.** `ExternalEndpointStore` has no delete.
 - **Config fields that are accepted but read by nothing:** `height_check.interval` (the cron is fixed at 30s; item 2b), `archival.check_interval`, `sync.check_interval`, `circuit_breaker.grpc_codes`.
+
+## 4. The test suite does not prove the service works — PLANNED, highest priority before any release
+
+Context: v2.0.0-beta.2 shipped with every RPC WebSocket upgrade rejected (503). Mainnet ran it from about 19:25 to 19:31Z on 2026-10-22, then was rolled back to 1.5.0. Jorge's requirement: tests must be real, live in the repo, run with `make` by anyone, and run in CI.
+
+**Measured on 2026-10-22, branch fix/websocket-availability.**
+
+Mutation testing (gremlins), test efficacy and surviving mutants per package:
+- proxy 69.6% (35); selector 79.3% (12); checker 83.8% (11); storage 82.9% (6); status 85.3% (5); config 94.9% (5); jsonpath 91.9% (3).
+- server covers only 21% of its mutants.
+- adapter, adapter/cosmos and urlutil are at 100%.
+
+**Verified in code:**
+- CI runs `go test -v ./...` without `-race`, so race-only tests check nothing in CI.
+- L3 is not in CI.
+- L3 has about 11 checks that always pass (`print_pass` in failure branches). TEST 16 greps a metric that does not exist, `sauron_proxy_requests_total`.
+
+**Coverage audit (read-only agent, spot-checked):**
+- gRPC is the only protocol with strong behavioural tests.
+- RPC GET and JSON-RPC POST have no tests at any level.
+- No protocol has a failover-through-the-proxy test.
+- Proxy L2 tests set store state by hand instead of running the scheduler.
+
+**Production bugs the tests hid** (verified in code; impact not measured):
+- The gRPC proxy never calls its circuit breaker, and its health check only checks that the transport is READY. A node failing every query stays in rotation.
+- A dead gRPC backend returns `Internal "failed to create stream"` instead of `Unavailable` (`proxy/grpc_proxy.go:303`).
+- An HTTP client cancel counts as a backend failure (errRetriable → RecordError and a retry).
+- WebSocket:
+  - the selector ignores `WebSocketAvailable`;
+  - a backend that answers the upgrade with something other than 101 is recorded as a breaker success;
+  - the copy loops have no idle deadline.
+- JSON-RPC bodies over 10 MB are silently truncated and still forwarded.
+- **External ring outage never marks its endpoints failed** (measured 2026-10-22 with the honest advanced L3 suite). The secondary was stopped for 120s, and the primary still reported 3 working external endpoints, an error count of 0 and no recoveries. A dead ring's validated endpoints stay routable. Production uses no externals today, so impact is low. The honest TESTs 6, 9 and 28 fail on this until it is fixed.
+
+**Proposed order:** CI that really tests → honest L3 with deterministic fake backends in CI → L2 protocol matrix with production wiring → fix the bugs above, each with a failing test first → kill the surviving mutants in critical packages, with `make mutation` as a nightly CI job → only then release v2.0.0-beta.3.
