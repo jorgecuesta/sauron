@@ -164,9 +164,10 @@ make docker-down
 
 ```bash
 make build    # Build binary
-make test     # Run unit tests
+make test     # Run all tests with the race detector
 make fmt      # Format code
-make lint     # Run linters
+make lint     # Run linters (pinned golangci-lint)
+make ci       # Run everything CI runs (test + lint + fmt-check)
 make clean    # Clean build artifacts
 ```
 

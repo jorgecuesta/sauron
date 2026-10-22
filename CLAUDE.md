@@ -28,11 +28,12 @@ make build
 ## How to Test
 
 ```bash
-make test             # go test -v ./...
-make fmt              # gofmt + goimports
-make lint             # golangci-lint (falls back to go vet)
-go test -race ./...   # Race detector — always run before committing
-go test -count=3 ./...  # Flaky test check
+make test             # go test -race -count=1 ./... (needs cgo)
+make fmt              # gofmt -s + goimports (pinned)
+make lint             # golangci-lint (pinned in the Makefile, run via go run)
+make fmt-check        # fail if gofmt/goimports would change a file
+make ci               # everything CI runs: test + lint + fmt-check
+go test -race -count=3 ./...  # Flaky test check
 ```
 
 **Test conventions**:
@@ -245,13 +246,14 @@ Client → Proxy (HTTP/gRPC) → Selector → Best Node
 
 ```bash
 make build    # Build binary to bin/sauron
-make test     # go test -v ./...
+make test     # go test -race -count=1 ./...
 make fmt      # gofmt -s + goimports
-make lint     # golangci-lint run (falls back to go vet)
+make lint     # golangci-lint (pinned version)
+make ci       # test + lint + fmt-check, exactly what CI runs
 make clean    # Remove binaries
 ```
 
-CI triggers on git tags (`v*`). Pipeline: test → lint → fmt-check → cross-platform build (linux/darwin, amd64/arm64) → Docker push to ghcr.io.
+CI runs `make test`, `make lint` and `make fmt-check` on every pull request and every push to `main`. On git tags (`v*`) it also does the cross-platform build (linux/darwin, amd64/arm64), the GitHub release and the Docker push to ghcr.io/pokt-network/sauron.
 
 ## Production Environment
 
@@ -280,7 +282,7 @@ Every code change must pass ALL of these before it is considered done:
 
 1. **Build**: `go build ./...` — zero errors
 2. **Tests**: `go test ./...` — all pass
-3. **Race detector**: `go test -race ./...` — no races
+3. **Race detector**: `make test` (runs with `-race`) — no races
 4. **Vet**: `go vet ./...` — no issues
 5. **Lint**: `make lint` (golangci-lint) — no issues. This catches errcheck, staticcheck, unused, and other rules that go vet misses. MUST run before pushing.
 6. **Format**: `gofmt -l .` — no files listed

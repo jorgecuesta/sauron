@@ -1,9 +1,23 @@
-name: Build and Push Docker Image
+name: CI
 
+# Tests, lint and format run on every pull request and every push to main, so
+# nothing reaches a release untested. Building and publishing only happen on
+# version tags.
 on:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+
+# Least privilege: jobs that only test read the repo; build-and-push grants its own.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
@@ -23,7 +37,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests
+      - name: Run tests (race detector)
         run: make test
 
   go-lint:
@@ -39,11 +53,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: GolangCI-Lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.14
-          args: --timeout=5m
+      - name: GolangCI-Lint (version pinned in Makefile)
+        run: make lint
 
   go-fmt-check:
     name: Go Format Check (gofmt + goimports)
@@ -58,28 +69,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install goimports
-        run: go install golang.org/x/tools/cmd/goimports@latest
-
-      - name: Check gofmt
-        run: |
-          CHANGED=$(gofmt -s -l . | tee /dev/stderr)
-          if [ -n "$CHANGED" ]; then
-            echo "::error ::gofmt would reformat the files above. Run 'make fmt'."
-            exit 1
-          fi
-
-      - name: Check goimports
-        run: |
-          # Only check .go files outside vendor (actions/checkout doesn't bring vendor by default)
-          FILES=$(git ls-files '*.go')
-          CHANGED=$(goimports -l $FILES | tee /dev/stderr)
-          if [ -n "$CHANGED" ]; then
-            echo "::error ::goimports would reformat the files above. Run 'make fmt'."
-            exit 1
-          fi
+      - name: Check gofmt and goimports (versions pinned in Makefile)
+        run: make fmt-check
 
   build-and-push:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [go-test, go-lint, go-fmt-check]
     runs-on: ubuntu-latest
     permissions:
