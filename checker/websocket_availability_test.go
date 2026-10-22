@@ -13,9 +13,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// cosmosNodeServer fakes a Cosmos node's RPC port: /status for the height
-// check and, when withWS is true, a /websocket endpoint that accepts a
-// subscription the way CometBFT does.
+// cosmosNodeServer fakes a Cosmos node's RPC port: /abci_info for the height
+// check, /status for health and, when withWS is true, a /websocket endpoint
+// that accepts a subscription the way CometBFT does.
 func cosmosNodeServer(t *testing.T, withWS bool) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -23,6 +23,8 @@ func cosmosNodeServer(t *testing.T, withWS bool) *httptest.Server {
 		switch r.URL.Path {
 		case "/status":
 			_, _ = w.Write([]byte(`{"result":{"sync_info":{"latest_block_height":"976232"}}}`))
+		case "/abci_info":
+			_, _ = w.Write([]byte(`{"result":{"response":{"last_block_height":"976232"}}}`))
 		case "/cosmos/base/tendermint/v1beta1/blocks/latest":
 			_, _ = w.Write([]byte(`{"sdk_block":{"header":{"height":"976232"}}}`))
 		case "/websocket":

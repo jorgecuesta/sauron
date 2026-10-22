@@ -68,10 +68,10 @@ func TestSchedulerDue_Concurrent(t *testing.T) {
 	}
 }
 
-// countingNode serves a Cosmos node's RPC /status and REST block queries and
-// counts each.
+// countingNode serves a Cosmos node's RPC /abci_info and /status and REST
+// block queries, counting height and archival checks.
 type countingNode struct {
-	status   atomic.Int32
+	height   atomic.Int32 // /abci_info, the RPC height check
 	archival atomic.Int32
 }
 
@@ -79,8 +79,10 @@ func (c *countingNode) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/abci_info":
+			c.height.Add(1)
+			_, _ = w.Write([]byte(`{"result":{"response":{"last_block_height":"100"}}}`))
 		case "/status":
-			c.status.Add(1)
 			_, _ = w.Write([]byte(`{"result":{"sync_info":{"latest_block_height":"100"}}}`))
 		case "/cosmos/base/tendermint/v1beta1/blocks/1":
 			c.archival.Add(1)
@@ -161,12 +163,12 @@ internals:
 	}
 	drainTestPool(sched.pool)
 
-	fs, ss := fast.status.Load(), slow.status.Load()
+	fs, ss := fast.height.Load(), slow.height.Load()
 	if ss == 0 {
 		t.Fatal("slow network never checked")
 	}
 	if fs != 2*ss {
-		t.Errorf("/status hits: fast %d, slow %d; want fast = 2 x slow (4 rounds vs 2)", fs, ss)
+		t.Errorf("height checks: fast %d, slow %d; want fast = 2 x slow (4 rounds vs 2)", fs, ss)
 	}
 	if got := fast.archival.Load(); got != 2 {
 		t.Errorf("fast archival checks = %d, want 2 (t0 and t0+2s at check_interval 2s)", got)

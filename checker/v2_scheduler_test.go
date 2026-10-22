@@ -121,12 +121,15 @@ internals:
 func TestMultiChainScheduler_CheckInternalNodes_HeightCheck(t *testing.T) {
 	t.Parallel()
 
-	// Mock a Cosmos RPC /status response.
+	// Mock a Cosmos node: RPC /status, /abci_info (the height check) and REST.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/status":
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"result":{"sync_info":{"latest_block_height":"58272941"}}}`))
+		case "/abci_info":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"result":{"response":{"last_block_height":"58272941"}}}`))
 		case "/cosmos/base/tendermint/v1beta1/blocks/latest":
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"sdk_block":{"header":{"height":"58272941"}}}`))
@@ -201,6 +204,9 @@ func TestMultiChainScheduler_CheckInternalNodes_HealthCheck(t *testing.T) {
 		case "/status":
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"result":{"sync_info":{"latest_block_height":"100"}}}`))
+		case "/abci_info":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"result":{"response":{"last_block_height":"100"}}}`))
 		case "/cosmos/base/tendermint/v1beta1/blocks/latest":
 			// REST health check — return 200.
 			w.WriteHeader(200)
@@ -230,6 +236,9 @@ func TestMultiChainScheduler_CheckInternalNodes_HealthCheckFailed(t *testing.T) 
 		case "/status":
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"result":{"sync_info":{"latest_block_height":"100"}}}`))
+		case "/abci_info":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"result":{"response":{"last_block_height":"100"}}}`))
 		case "/cosmos/base/tendermint/v1beta1/blocks/latest":
 			// REST endpoint is down.
 			w.WriteHeader(503)

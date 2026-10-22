@@ -27,10 +27,14 @@ func (f *Factory) HeightCheck(net adapter.NetworkConfig) (adapter.CheckConfig, e
 
 	switch protocol {
 	case "rpc":
+		// /abci_info is the height the app has committed. /status reports the
+		// blockstore height, which CometBFT saves before the app commits the
+		// block (SaveBlock runs before ApplyVerifiedBlock), so it runs ahead and
+		// a query at that height can still fail on the node.
 		return adapter.CheckConfig{
 			Method:         "GET",
-			URLPath:        "/status",
-			ResponsePath:   ".result.sync_info.latest_block_height",
+			URLPath:        "/abci_info",
+			ResponsePath:   ".result.response.last_block_height",
 			ResponseFormat: "string",
 			Protocol:       "rpc",
 		}, nil

@@ -61,15 +61,15 @@ func TestBuildOracleConfig_CosmosSimpleOracle(t *testing.T) {
 		t.Errorf("Oracle URL = %q, want %q", ep.URL, "http://oracle1.example.com:26657")
 	}
 
-	// Cosmos default: GET /status via rpc.
+	// Cosmos default: GET /abci_info via rpc (app-committed height, as for nodes).
 	if ep.Check.Method != "GET" {
 		t.Errorf("Check.Method = %q, want %q", ep.Check.Method, "GET")
 	}
-	if ep.Check.URLPath != "/status" {
-		t.Errorf("Check.URLPath = %q, want %q", ep.Check.URLPath, "/status")
+	if ep.Check.URLPath != "/abci_info" {
+		t.Errorf("Check.URLPath = %q, want %q", ep.Check.URLPath, "/abci_info")
 	}
-	if ep.Check.ResponsePath != ".result.sync_info.latest_block_height" {
-		t.Errorf("Check.ResponsePath = %q, want %q", ep.Check.ResponsePath, ".result.sync_info.latest_block_height")
+	if ep.Check.ResponsePath != ".result.response.last_block_height" {
+		t.Errorf("Check.ResponsePath = %q, want %q", ep.Check.ResponsePath, ".result.response.last_block_height")
 	}
 	if ep.Check.ResponseFormat != "string" {
 		t.Errorf("Check.ResponseFormat = %q, want %q", ep.Check.ResponseFormat, "string")
@@ -159,8 +159,8 @@ func TestBuildOracleConfig_MultipleOracles(t *testing.T) {
 	if first.URL != "http://oracle-default.example.com:26657" {
 		t.Errorf("Oracles[0].URL = %q, want default oracle URL", first.URL)
 	}
-	if first.Check.URLPath != "/status" {
-		t.Errorf("Oracles[0].Check.URLPath = %q, want %q", first.Check.URLPath, "/status")
+	if first.Check.URLPath != "/abci_info" {
+		t.Errorf("Oracles[0].Check.URLPath = %q, want %q", first.Check.URLPath, "/abci_info")
 	}
 	if first.Check.Protocol != "rpc" {
 		t.Errorf("Oracles[0].Check.Protocol = %q, want %q", first.Check.Protocol, "rpc")

@@ -158,7 +158,7 @@ func TestRPCStatusPOSTEchoesID(t *testing.T) {
 
 func TestRPCUnknownMethod(t *testing.T) {
 	e := startEnv(t, time.Hour)
-	resp, body := do(t, "POST", "http://"+e.rpc+"/", `{"jsonrpc":"2.0","id":3,"method":"abci_info"}`)
+	resp, body := do(t, "POST", "http://"+e.rpc+"/", `{"jsonrpc":"2.0","id":3,"method":"net_info"}`)
 	r := decodeRPC(t, body)
 	if resp.StatusCode != 200 || r.Error == nil || r.Error.Code != -32601 || r.Error.Message != "Method not found" || string(r.ID) != "3" {
 		t.Errorf("status=%d body=%s", resp.StatusCode, body)
@@ -476,5 +476,36 @@ func TestRunReturnsOnCancel(t *testing.T) {
 		e.done <- nil // let cleanup drain
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return with open websocket")
+	}
+}
+
+// /abci_info (GET and JSON-RPC) reports the height sauron's Cosmos height
+// check reads, and fails with the node.
+func TestRPCAbciInfo(t *testing.T) {
+	e := startEnv(t, time.Hour)
+	type abci struct {
+		ID     json.RawMessage `json:"id"`
+		Result struct {
+			Response struct {
+				Height string `json:"last_block_height"`
+			} `json:"response"`
+		} `json:"result"`
+	}
+	for _, tc := range []struct{ method, url, body, id string }{
+		{"GET", "http://" + e.rpc + "/abci_info", "", "-1"},
+		{"POST", "http://" + e.rpc + "/", `{"jsonrpc":"2.0","id":7,"method":"abci_info"}`, "7"},
+	} {
+		resp, body := do(t, tc.method, tc.url, tc.body)
+		var r abci
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatalf("%s %s: decode %q: %v", tc.method, tc.url, body, err)
+		}
+		if resp.StatusCode != 200 || r.Result.Response.Height != "1000" || string(r.ID) != tc.id {
+			t.Errorf("%s %s: status=%d body=%s", tc.method, tc.url, resp.StatusCode, body)
+		}
+	}
+	do(t, "POST", "http://"+e.adm+"/admin/fail", "")
+	if resp, _ := do(t, "GET", "http://"+e.rpc+"/abci_info", ""); resp.StatusCode != 503 {
+		t.Errorf("failed node /abci_info status = %d, want 503", resp.StatusCode)
 	}
 }

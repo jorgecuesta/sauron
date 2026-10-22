@@ -121,6 +121,14 @@ func (n *Node) statusResult(id json.RawMessage) map[string]any {
 	}}
 }
 
+// abciInfoResult is /abci_info: the app-committed height sauron's Cosmos
+// height check reads.
+func (n *Node) abciInfoResult(id json.RawMessage) map[string]any {
+	return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+		"response": map[string]any{"data": "fakenode", "last_block_height": strconv.FormatInt(n.Height(), 10)},
+	}}
+}
+
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 // RPCHandler serves the CometBFT RPC subset (HTTP, JSON-RPC, WebSocket).
@@ -128,6 +136,9 @@ func (n *Node) RPCHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, n.statusResult(json.RawMessage("-1")))
+	})
+	mux.HandleFunc("GET /abci_info", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, n.abciInfoResult(json.RawMessage("-1")))
 	})
 	mux.HandleFunc("POST /{$}", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -141,8 +152,12 @@ func (n *Node) RPCHandler() http.Handler {
 		if len(req.ID) == 0 {
 			req.ID = json.RawMessage("null")
 		}
-		if req.Method == "status" {
+		switch req.Method {
+		case "status":
 			writeJSON(w, n.statusResult(req.ID))
+			return
+		case "abci_info":
+			writeJSON(w, n.abciInfoResult(req.ID))
 			return
 		}
 		writeJSON(w, map[string]any{"jsonrpc": "2.0", "id": req.ID,

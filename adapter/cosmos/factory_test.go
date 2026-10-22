@@ -1,6 +1,9 @@
 package cosmos
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"sauron/adapter"
@@ -28,8 +31,8 @@ func TestFactory_HeightCheck(t *testing.T) {
 		{
 			name:     "default protocol is rpc",
 			net:      adapter.NetworkConfig{Name: "pocket", Type: "cosmos"},
-			wantPath: ".result.sync_info.latest_block_height",
-			wantURL:  "/status",
+			wantPath: ".result.response.last_block_height",
+			wantURL:  "/abci_info",
 		},
 		{
 			name: "explicit rpc",
@@ -40,8 +43,8 @@ func TestFactory_HeightCheck(t *testing.T) {
 					Protocol: "rpc",
 				},
 			},
-			wantPath: ".result.sync_info.latest_block_height",
-			wantURL:  "/status",
+			wantPath: ".result.response.last_block_height",
+			wantURL:  "/abci_info",
 		},
 		{
 			name: "rest protocol",
@@ -381,3 +384,57 @@ func TestFactory_ArchivalCheck(t *testing.T) {
 
 // Verify Factory satisfies ChainAdapter interface.
 var _ adapter.ChainAdapter = (*Factory)(nil)
+
+// TestFactory_RPCHeightIsAppCommitted (#22): the RPC height check reads the
+// app-committed height from /abci_info, not the blockstore height in /status,
+// which CometBFT saves before the app commits the block (SaveBlock runs before
+// ApplyVerifiedBlock). Payloads are a CometBFT 0.38 node's, a block apart.
+func TestFactory_RPCHeightIsAppCommitted(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":-1,"result":{"node_info":{"network":"pocket"},"sync_info":{"latest_block_height":"752798","catching_up":false}}}`))
+		case "/abci_info":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":-1,"result":{"response":{"data":"pocket","version":"v0.1.30","last_block_height":"752797","last_block_app_hash":"3q2+7w=="}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	check, err := New().HeightCheck(adapter.NetworkConfig{Name: "pocket", Type: "cosmos"})
+	if err != nil {
+		t.Fatalf("HeightCheck: %v", err)
+	}
+	height, err := adapter.NewEngine(srv.Client()).CheckHeight(context.Background(), check, srv.URL)
+	if err != nil {
+		t.Fatalf("CheckHeight: %v", err)
+	}
+	if height != 752797 {
+		t.Errorf("height = %d, want 752797 (app-committed, /abci_info), not the blockstore's 752798", height)
+	}
+}
+
+// A node whose app has not committed any block answers last_block_height
+// omitted (proto omitempty) or "0": that is no height, not a valid one.
+func TestFactory_RPCHeightAbciInfoWithoutHeight(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":-1,"result":{"response":{"data":"pocket"}}}`,
+		`{"jsonrpc":"2.0","id":-1,"result":{"response":{"last_block_height":"0"}}}`,
+		`{"jsonrpc":"2.0","id":-1,"error":{"code":-32603,"message":"Internal error"}}`,
+	} {
+		body := body
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		check, _ := New().HeightCheck(adapter.NetworkConfig{Name: "pocket", Type: "cosmos"})
+		height, err := adapter.NewEngine(srv.Client()).CheckHeight(context.Background(), check, srv.URL)
+		srv.Close()
+		if err == nil && height > 0 {
+			t.Errorf("body %s: height %d accepted", body, height)
+		}
+	}
+}
