@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+
+	"sauron/internal/grpcutil"
 )
 
 // knownChainTypes lists the built-in adapter types.
@@ -198,6 +202,39 @@ func validateMultiChainNetwork(net *MultiChainNetwork, index int, names map[stri
 		}
 	}
 
+	if net.CircuitBreaker != nil {
+		if err := validateCircuitBreaker(net.CircuitBreaker); err != nil {
+			return fmt.Errorf("network %d (%s): circuit_breaker %w", index, net.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func validateCircuitBreaker(cb *CircuitBreakerConfig) error {
+	if cb.Threshold < 0 {
+		return fmt.Errorf("threshold cannot be negative: %d", cb.Threshold)
+	}
+	if cb.RetryAttempts < 0 {
+		return fmt.Errorf("retry_attempts cannot be negative: %d", cb.RetryAttempts)
+	}
+	if cb.RetryBackoff < 0 {
+		return fmt.Errorf("retry_backoff cannot be negative: %s", cb.RetryBackoff)
+	}
+	for _, code := range cb.HTTPCodes {
+		if code < 100 || code > 599 {
+			return fmt.Errorf("http_codes: %d is not an HTTP status code", code)
+		}
+	}
+	for _, name := range cb.GRPCCodes {
+		code, ok := grpcutil.ParseCode(name)
+		if !ok {
+			return fmt.Errorf("grpc_codes: unknown gRPC code %q", name)
+		}
+		if code == codes.OK {
+			return fmt.Errorf("grpc_codes: gRPC code %q cannot count as a failure", name)
+		}
+	}
 	return nil
 }
 

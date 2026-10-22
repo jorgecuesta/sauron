@@ -62,7 +62,7 @@ var configFieldClass = map[string]string{
 	"networks[].sync.oracles[].response_path":       "startup",
 	"networks[].sync.oracles[].response_format":     "startup",
 	"networks[].circuit_breaker.http_codes":         "live",
-	"networks[].circuit_breaker.grpc_codes":         "live", // unused: the gRPC proxy has no breaker
+	"networks[].circuit_breaker.grpc_codes":         "live", // read per gRPC call by GRPCProxy.recordBreakerOutcome
 	"networks[].circuit_breaker.threshold":          "live",
 	"networks[].circuit_breaker.retry_attempts":     "live",
 	"networks[].circuit_breaker.retry_backoff":      "live",

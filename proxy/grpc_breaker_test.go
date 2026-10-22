@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,9 +21,10 @@ import (
 
 // Backend behaviours for grpcBreakerHarness nodes.
 const (
-	modeOK          int32 = iota // answers with its node name
-	modeUnavailable              // every call fails with Unavailable (backend origin)
-	modeNotFound                 // every call fails with NotFound: the node works, the query is bad
+	modeOK                int32 = iota // answers with its node name
+	modeUnavailable                    // every call fails with Unavailable (backend origin)
+	modeNotFound                       // every call fails with NotFound: the node works, the query is bad
+	modeResourceExhausted              // every call fails with ResourceExhausted (rate limited)
 )
 
 // grpcBreakerHarness wires two internal gRPC nodes (node-a, node-b) at the same
@@ -36,8 +38,9 @@ type grpcBreakerHarness struct {
 }
 
 // newGRPCBreakerHarness builds the harness. withCB passes a circuit breaker to
-// the proxy; withCfg adds the network's circuit_breaker section (threshold 3).
-func newGRPCBreakerHarness(t *testing.T, network string, withCB, withCfg bool) *grpcBreakerHarness {
+// the proxy; withCfg adds the network's circuit_breaker section (threshold 3),
+// with grpcCodes as its grpc_codes when given.
+func newGRPCBreakerHarness(t *testing.T, network string, withCB, withCfg bool, grpcCodes ...string) *grpcBreakerHarness {
 	t.Helper()
 	h := &grpcBreakerHarness{modes: map[string]*atomic.Int32{}}
 	addrs := map[string]string{}
@@ -54,6 +57,8 @@ func newGRPCBreakerHarness(t *testing.T, network string, withCB, withCfg bool) *
 				return status.Error(codes.Unavailable, "node is broken")
 			case modeNotFound:
 				return status.Error(codes.NotFound, "no such block")
+			case modeResourceExhausted:
+				return status.Error(codes.ResourceExhausted, "slow down")
 			}
 			return stream.SendMsg(&rawFrame{payload: []byte(name)})
 		}
@@ -74,6 +79,9 @@ func newGRPCBreakerHarness(t *testing.T, network string, withCB, withCfg bool) *
       http_codes: [502, 503]
       threshold: 3
       retry_attempts: 0`
+		if len(grpcCodes) > 0 {
+			cbSection += "\n      grpc_codes: [" + strings.Join(grpcCodes, ", ") + "]"
+		}
 	}
 	yaml := `
 listen: ":3000"
@@ -309,4 +317,51 @@ func TestGRPCProxy_BreakerCombinations(t *testing.T) {
 			}
 		})
 	}
+}
+
+// circuit_breaker.grpc_codes replaces the default failure set: with
+// [resource_exhausted], a rate-limiting node is taken out and an Unavailable
+// does not count (the node answered, as with an HTTP code not in http_codes).
+func TestGRPCProxy_ConfiguredGRPCCodes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("listed code trips the breaker", func(t *testing.T) {
+		t.Parallel()
+		const network = "grpc-cb-codes-listed"
+		h := newGRPCBreakerHarness(t, network, true, true, "resource_exhausted")
+		h.modes["node-b"].Store(modeResourceExhausted)
+		for i := 0; i < 6; i++ {
+			h.call(t)
+		}
+		if h.healthStore.IsHealthy(network, "node-b", "grpc") {
+			t.Errorf("node-b healthy after 3 ResourceExhausted with grpc_codes [resource_exhausted] (errors %d)", h.cb.GetErrorCount(network, "node-b", "grpc"))
+		}
+	})
+	t.Run("default code not listed does not count", func(t *testing.T) {
+		t.Parallel()
+		const network = "grpc-cb-codes-unlisted"
+		h := newGRPCBreakerHarness(t, network, true, true, "resource_exhausted")
+		h.modes["node-b"].Store(modeUnavailable)
+		for i := 0; i < 6; i++ {
+			h.call(t)
+		}
+		if !h.healthStore.IsHealthy(network, "node-b", "grpc") {
+			t.Error("node-b excluded for Unavailable, which grpc_codes [resource_exhausted] does not list")
+		}
+		if got := h.cb.GetErrorCount(network, "node-b", "grpc"); got != 0 {
+			t.Errorf("node-b error count = %d, want 0", got)
+		}
+	})
+	t.Run("default set without grpc_codes ignores ResourceExhausted", func(t *testing.T) {
+		t.Parallel()
+		const network = "grpc-cb-codes-default"
+		h := newGRPCBreakerHarness(t, network, true, true)
+		h.modes["node-b"].Store(modeResourceExhausted)
+		for i := 0; i < 6; i++ {
+			h.call(t)
+		}
+		if !h.healthStore.IsHealthy(network, "node-b", "grpc") {
+			t.Error("node-b excluded for ResourceExhausted under the default set")
+		}
+	})
 }

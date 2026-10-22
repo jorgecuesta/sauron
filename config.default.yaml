@@ -56,6 +56,13 @@ networks:
         advertise: "localhost:8082"
         grpc_max_recv_msg_size: 104857600
         grpc_max_send_msg_size: 104857600
+    # Circuit breaker (optional; without it no node is taken out on errors).
+    # circuit_breaker:
+    #   threshold: 3                 # consecutive errors before the node leaves rotation
+    #   http_codes: [502, 503, 504]  # HTTP statuses that count and are retried
+    #   grpc_codes: [unavailable, internal, unknown, data_loss]  # default set when omitted
+    #   retry_attempts: 2            # HTTP only
+    #   retry_backoff: 100ms
 
   # EVM network example (uncomment to enable)
   # - name: ethereum

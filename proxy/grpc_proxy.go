@@ -479,7 +479,6 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 
 		// Track 5xx-equivalent gRPC errors for external endpoints.
 		if trackableBackendFailure(end.origin, grpcStatus) {
-			p.recordBreakerError(nodeName)
 			if p.endpointStore != nil {
 				if p.endpointStore.TrackProxyError(p.network, "grpc", targetAddr) {
 					p.logger.Debug("Tracked gRPC 5xx-equivalent error for external endpoint",
@@ -490,9 +489,8 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 				}
 			}
 		}
-		if end.origin != originClient && !trackableBackendFailure(end.origin, grpcStatus) {
-			// The node answered (e.g. NotFound for a bad query): it is alive.
-			p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
+		if end.origin != originClient {
+			p.recordBreakerOutcome(nodeName, grpcStatus)
 		}
 	} else {
 		p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
@@ -523,6 +521,24 @@ func (p *GRPCProxy) recordBreakerError(nodeName string) {
 	if cbCfg := networkCircuitBreakerConfig(p.configLoader, p.network); cbCfg != nil {
 		p.circuitBreaker.RecordError(p.network, nodeName, "grpc", cbCfg.Threshold)
 	}
+}
+
+// recordBreakerOutcome records a call the node answered with code: an error
+// when the network's grpc_codes (or the default failure set) lists it, else a
+// success, since the node answered (e.g. NotFound for a bad query).
+func (p *GRPCProxy) recordBreakerOutcome(nodeName string, code codes.Code) {
+	if p.circuitBreaker == nil {
+		return
+	}
+	cbCfg := networkCircuitBreakerConfig(p.configLoader, p.network)
+	if cbCfg == nil {
+		return
+	}
+	if grpcutil.IsBreakerFailure(cbCfg.GRPCCodes, code) {
+		p.circuitBreaker.RecordError(p.network, nodeName, "grpc", cbCfg.Threshold)
+		return
+	}
+	p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
 }
 
 func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
