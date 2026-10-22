@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,24 @@ type MultiChainScheduler struct {
 	logger        *zap.Logger
 	timeout       atomic.Int64                  // health-check timeout (ns); written by every cron job, so atomic
 	lastRun       *xsync.Map[string, time.Time] // when each periodic check last ran, by "kind:network"
+	inFlight      sync.Map                      // check key -> *atomic.Bool, set while that check runs
+}
+
+// goOnce runs fn on the pool unless the previous run of the check named key is
+// still going. With an interval shorter than a check's timeout, a slow node
+// would otherwise get overlapping checks that finish out of order.
+func (s *MultiChainScheduler) goOnce(key string, fn func()) {
+	v, _ := s.inFlight.LoadOrStore(key, new(atomic.Bool))
+	running := v.(*atomic.Bool)
+	if !running.CompareAndSwap(false, true) {
+		return
+	}
+	if err := s.pool.Go(func() {
+		defer running.Store(false)
+		fn()
+	}); err != nil {
+		running.Store(false)
+	}
 }
 
 func newLastRunMap() *xsync.Map[string, time.Time] {
@@ -188,7 +207,7 @@ func (s *MultiChainScheduler) tick(now time.Time) {
 		}
 	}
 
-	if s.oracleChecker != nil {
+	if s.oracleChecker != nil && len(s.oracleChecker.Networks()) > 0 {
 		_ = s.pool.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 			defer cancel()
@@ -261,7 +280,7 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 
 		// Skip gRPC height checks — engine only handles HTTP.
 		if !checkCfg.IsGRPC {
-			_ = s.pool.Go(func() {
+			s.goOnce("height:"+node.Network+":"+node.Name, func() {
 				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
@@ -323,7 +342,7 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 
 // scheduleHTTPHealthCheck runs an HTTP health check via the adapter engine.
 func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode, nodeURL string, hc adapter.HealthCheckConfig) {
-	_ = s.pool.Go(func() {
+	s.goOnce("health:"+node.Network+":"+node.Name+":"+hc.Protocol, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
@@ -351,7 +370,12 @@ const grpcHealthQueryMethod = "/cosmos.base.tendermint.v1beta1.Service/GetLatest
 // proxy's circuit breaker counts) or no answer within the check timeout is
 // unhealthy; any other answer, such as Unimplemented on a non-Cosmos chain,
 // proves the node serves.
-func (s *MultiChainScheduler) grpcHealthQuery(ctx context.Context, conn *grpc.ClientConn, node config.MultiChainNode, protocol string) {
+func (s *MultiChainScheduler) grpcHealthQuery(conn *grpc.ClientConn, node config.MultiChainNode, protocol string) {
+	// The query gets the whole check timeout of its own: reaching READY may
+	// have used most of the dial's, and that is no reason to call the node
+	// unhealthy.
+	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
+	defer cancel()
 	// The answer is not decoded: only whether and how the node answered
 	// matters, and a local decoding error must not count as a node failure.
 	req, resp := []byte{}, []byte{}
@@ -371,7 +395,7 @@ func (s *MultiChainScheduler) grpcHealthQuery(ctx context.Context, conn *grpc.Cl
 // scheduleGRPCHealthCheck verifies that a gRPC endpoint is reachable by
 // dialing and waiting for the connection to reach the READY state.
 func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode, grpcAddr string, protocol string) {
-	_ = s.pool.Go(func() {
+	s.goOnce("health:"+node.Network+":"+node.Name+":"+protocol, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
@@ -401,7 +425,7 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 		for {
 			state := conn.GetState()
 			if state == connectivity.Ready {
-				s.grpcHealthQuery(ctx, conn, node, protocol)
+				s.grpcHealthQuery(conn, node, protocol)
 				return
 			}
 			if state == connectivity.TransientFailure || state == connectivity.Shutdown {
@@ -434,7 +458,7 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 // entry under heightProtocol: that entry is what the selector returns and what
 // the HTTP proxy checks before allowing a WebSocket upgrade.
 func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL, protocol, heightProtocol string) {
-	_ = s.pool.Go(func() {
+	s.goOnce("health:"+node.Network+":"+node.Name+":"+protocol, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 

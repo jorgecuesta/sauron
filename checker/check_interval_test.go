@@ -157,11 +157,13 @@ internals:
 		storage.NewArchivalStore(), storage.NewCache("", zap.NewNop()), storage.NewExternalEndpointStore(zap.NewNop()),
 		nil, testutil.NewMultiChainLoader(t, yaml), newTestPool(), zap.NewNop())
 
+	// Each tick's checks finish before the next, as they do a second apart.
 	t0 := time.Now()
 	for i := 0; i < 4; i++ {
+		sched.pool = newTestPool()
 		sched.tick(t0.Add(time.Duration(i) * time.Second))
+		drainTestPool(sched.pool)
 	}
-	drainTestPool(sched.pool)
 
 	fs, ss := fast.height.Load(), slow.height.Load()
 	if ss == 0 {
@@ -311,5 +313,62 @@ func TestCheckArchivalStatus_InfoOnlyOnChange(t *testing.T) {
 	}
 	if archivalStore.IsArchival("pocket", "seed-one") {
 		t.Error("node still archival after the block became unavailable")
+	}
+}
+
+// A check still running when the node's next round comes is not started
+// again: with an interval shorter than the check timeout, a slow node would
+// otherwise get overlapping checks that finish out of order.
+func TestScheduler_NoOverlappingChecksForSlowNode(t *testing.T) {
+	t.Parallel()
+	var heightHits, statusHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/abci_info":
+			heightHits.Add(1)
+			time.Sleep(600 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"result":{"response":{"last_block_height":"100"}}}`))
+		case "/cosmos/base/tendermint/v1beta1/blocks/latest": // REST health check
+			statusHits.Add(1)
+			time.Sleep(600 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"sdk_block":{"header":{"height":"100"}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	sched, _, _ := testMultiChainSetup(t, srv.URL)
+	for i := 0; i < 3; i++ {
+		sched.checkInternalNodes()
+		time.Sleep(50 * time.Millisecond)
+	}
+	drainTestPool(sched.pool)
+	if got := heightHits.Load(); got != 1 {
+		t.Errorf("height check ran %d times for 3 overlapping rounds, want 1", got)
+	}
+	if got := statusHits.Load(); got != 1 {
+		t.Errorf("REST health check ran %d times for 3 overlapping rounds, want 1", got)
+	}
+}
+
+// With no network configuring sync, the tick submits no oracle task.
+func TestSchedulerTick_NoOracleTaskWithoutSync(t *testing.T) {
+	t.Parallel()
+	var node countingNode
+	srv := node.server(t)
+	submitted := func(oc *OracleChecker) uint64 {
+		sched, _, _ := testMultiChainSetup(t, srv.URL)
+		sched.oracleChecker = oc
+		pool := newTestPool()
+		sched.pool = pool
+		sched.tick(time.Now())
+		n := pool.SubmittedTasks()
+		drainTestPool(pool)
+		return n
+	}
+	empty := NewOracleChecker(adapter.NewEngine(http.DefaultClient), storage.NewOracleStore(), zap.NewNop())
+	if with, without := submitted(empty), submitted(nil); with != without {
+		t.Errorf("tick submitted %d tasks with an oracle checker that has no networks, %d without one; want equal", with, without)
 	}
 }

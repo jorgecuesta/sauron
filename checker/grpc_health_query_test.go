@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -191,5 +192,65 @@ func TestScheduleGRPCHealthCheck_AnswerIsNotDecoded(t *testing.T) {
 	runGRPCHealthCheck(t, sched, lis.Addr().String())
 	if !healthStore.IsHealthy("testnet", "test-node", "grpc") {
 		t.Errorf("node answering non-protobuf bytes marked unhealthy: %+v", healthStore.GetHealth("testnet", "test-node", "grpc"))
+	}
+}
+
+// delayedProxy forwards TCP to target, holding the first bytes from the
+// server for delay: a node whose connection takes that long to become READY.
+func delayedProxy(t *testing.T, target string, delay time.Duration) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				b, err := net.Dial("tcp", target)
+				if err != nil {
+					return
+				}
+				defer func() { _ = b.Close() }()
+				go func() { _, _ = io.Copy(b, c) }()
+				time.Sleep(delay)
+				_, _ = io.Copy(c, b)
+			}(c)
+		}
+	}()
+	return lis.Addr().String()
+}
+
+// The query gets the whole check timeout of its own: a connection that is
+// slow to become READY must not leave the query too little time and mark a
+// node that answers as unhealthy.
+func TestScheduleGRPCHealthCheck_QueryHasItsOwnTimeout(t *testing.T) {
+	t.Parallel()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer(grpc.UnknownServiceHandler(func(_ interface{}, stream grpc.ServerStream) error {
+		var req emptypb.Empty
+		if err := stream.RecvMsg(&req); err != nil {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond) // a query that takes a while
+		return stream.SendMsg(&emptypb.Empty{})
+	}))
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	addr := delayedProxy(t, lis.Addr().String(), 400*time.Millisecond)
+
+	sched, healthStore := testHealthCheckScheduler(t)
+	sched.timeout.Store(int64(500 * time.Millisecond))
+	runGRPCHealthCheck(t, sched, addr)
+	if !healthStore.IsHealthy("testnet", "test-node", "grpc") {
+		t.Errorf("node READY after 400ms and answering in 200ms marked unhealthy with a 500ms timeout: %+v", healthStore.GetHealth("testnet", "test-node", "grpc"))
 	}
 }
