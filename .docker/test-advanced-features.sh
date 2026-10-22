@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Host ports (override to run while something else holds the defaults).
+PRIMARY_STATUS_PORT="${SAURON_PRIMARY_STATUS_PORT:-3000}"
+SECONDARY_STATUS_PORT="${SAURON_SECONDARY_STATUS_PORT:-4000}"
+PRIMARY_API_PORT="${SAURON_PRIMARY_API_PORT:-8080}"
+
 # Advanced Feature Testing Suite
 # Tests: Routing, Hot Reload, Redis Distribution, Health Recovery
 
@@ -104,7 +109,7 @@ TIMEOUT=60
 ELAPSED=0
 VALIDATED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    VALIDATED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
     VALIDATED=${VALIDATED:-0}
     if [ "$VALIDATED" -ge 3 ]; then
         break
@@ -125,7 +130,7 @@ run_test
 print_test "Send actual API request through primary and verify it routes"
 
 # Make a request through primary's API proxy (using same endpoint as health checks)
-RESPONSE=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:8080/cosmos/base/tendermint/v1beta1/blocks/latest 2>&1)
+RESPONSE=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:${PRIMARY_API_PORT}/cosmos/base/tendermint/v1beta1/blocks/latest 2>&1)
 
 print_info "Response: ${RESPONSE:0:100}"
 
@@ -140,7 +145,7 @@ run_test
 print_test "Check routing metrics to see if external endpoints were selected"
 
 # Look for selector metrics (correct metric name: sauron_routing_selections_total)
-SELECTIONS=$(curl -s http://localhost:3000/metrics | grep 'sauron_routing_selections_total' | head -5)
+SELECTIONS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_routing_selections_total' | head -5)
 
 print_info "Node selection metrics:"
 echo "$SELECTIONS"
@@ -193,14 +198,14 @@ fi
 run_test
 print_test "Check if error count metrics increased"
 
-ERROR_COUNT=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_error_count' | grep -v ' 0$' | wc -l)
+ERROR_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_error_count' | grep -v ' 0$' | wc -l)
 ERROR_COUNT=${ERROR_COUNT:-0}  # Default to 0 if empty
 
 print_info "Endpoints with non-zero error count: $ERROR_COUNT"
 
 if [ "$ERROR_COUNT" -gt 0 ]; then
     print_pass "Error counts increased for failed endpoints"
-    curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_error_count' | grep -v ' 0$'
+    curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_error_count' | grep -v ' 0$'
 else
     print_fail "Error counts did not increase"
 fi
@@ -244,7 +249,7 @@ TIMEOUT=60
 ELAPSED=0
 VALIDATED_AFTER=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    VALIDATED_AFTER=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+    VALIDATED_AFTER=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
     VALIDATED_AFTER=${VALIDATED_AFTER:-0}
     if [ "$VALIDATED_AFTER" -ge 3 ]; then
         break
@@ -263,7 +268,7 @@ fi
 run_test
 print_test "Check recovery metrics"
 
-RECOVERY_COUNT=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoint_recoveries_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+RECOVERY_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_recoveries_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 RECOVERY_COUNT=${RECOVERY_COUNT:-0}
 
 print_info "Total recoveries: $RECOVERY_COUNT"
@@ -314,7 +319,7 @@ run_test
 print_test "Verify primary is still functional after reload"
 
 sleep 2
-HEALTH=$(curl -s http://localhost:3000/health)
+HEALTH=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/health)
 
 if [ "$HEALTH" = "OK" ]; then
     print_pass "Primary still healthy after reload"
@@ -387,8 +392,8 @@ run_test
 print_test "Verify selector has both internal and external endpoints available"
 
 # Check metrics for both internal and external selections
-INTERNAL_SELECTIONS=$(curl -s http://localhost:3000/metrics | grep 'sauron_routing_selections_total' | grep -v 'ext:' | wc -l)
-EXTERNAL_REFS=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints' | wc -l)
+INTERNAL_SELECTIONS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_routing_selections_total' | grep -v 'ext:' | wc -l)
+EXTERNAL_REFS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints' | wc -l)
 INTERNAL_SELECTIONS=${INTERNAL_SELECTIONS:-0}  # Default to 0 if empty
 EXTERNAL_REFS=${EXTERNAL_REFS:-0}  # Default to 0 if empty
 
@@ -407,14 +412,14 @@ print_test "Send multiple requests to test load distribution"
 
 print_info "Sending 10 requests through primary..."
 for i in {1..10}; do
-    curl -s -H "Authorization: Bearer test-token-123" http://localhost:8080/cosmos/base/tendermint/v1beta1/blocks/latest >/dev/null 2>&1 &
+    curl -s -H "Authorization: Bearer test-token-123" http://localhost:${PRIMARY_API_PORT}/cosmos/base/tendermint/v1beta1/blocks/latest >/dev/null 2>&1 &
 done
 wait
 
 sleep 2
 
 # Check if requests were distributed
-REQUEST_COUNT=$(curl -s http://localhost:3000/metrics | grep 'sauron_proxy_requests_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+REQUEST_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_proxy_requests_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 REQUEST_COUNT=${REQUEST_COUNT:-0}  # Default to 0 if empty
 
 print_info "Total proxied requests: $REQUEST_COUNT"
@@ -436,10 +441,10 @@ print_test "Test status endpoint with valid authentication"
 
 # Status endpoint requires auth and returns height + advertised endpoints
 # Format: /{network}/status
-STATUS=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:3000/pocket/status)
+STATUS=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:${PRIMARY_STATUS_PORT}/pocket/status)
 print_info "Status response: ${STATUS:0:150}"
 
-if echo "$STATUS" | grep -qE '(height|api|rpc|grpc)'; then
+if echo "$STATUS" | jq -e '.height > 0 and (.endpoints | has("rest") and has("rpc") and has("grpc"))' >/dev/null 2>&1; then
     print_pass "Status endpoint returned valid response with auth"
 else
     print_fail "Status endpoint failed with valid auth"
@@ -448,7 +453,7 @@ fi
 run_test
 print_test "Test authentication failure: missing token"
 
-RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:3000/pocket/status 2>&1)
+RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:${PRIMARY_STATUS_PORT}/pocket/status 2>&1)
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | head -1)
 
@@ -463,7 +468,7 @@ fi
 run_test
 print_test "Test authentication failure: invalid token"
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer invalid-token-xyz" http://localhost:3000/pocket/status 2>&1)
+RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer invalid-token-xyz" http://localhost:${PRIMARY_STATUS_PORT}/pocket/status 2>&1)
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
 print_info "HTTP code: $HTTP_CODE"
@@ -477,7 +482,7 @@ fi
 run_test
 print_test "Test authentication failure: malformed header"
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: NotBearer test-token-123" http://localhost:3000/pocket/status 2>&1)
+RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: NotBearer test-token-123" http://localhost:${PRIMARY_STATUS_PORT}/pocket/status 2>&1)
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
 print_info "HTTP code: $HTTP_CODE"
@@ -491,7 +496,7 @@ fi
 run_test
 print_test "Check authentication failure metrics"
 
-AUTH_FAILURES=$(curl -s http://localhost:3000/metrics | grep 'sauron_auth_failures_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+AUTH_FAILURES=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_auth_failures_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 AUTH_FAILURES=${AUTH_FAILURES:-0}  # Default to 0 if empty
 print_info "Total auth failures: $AUTH_FAILURES"
 
@@ -532,7 +537,7 @@ print_info "Sending 25 rapid requests (limit: 10/sec, burst: 20)..."
 SUCCESS=0
 THROTTLED=0
 for i in {1..25}; do
-    HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null -H "Authorization: Bearer test-token-123" http://localhost:3000/pocket/status)
+    HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null -H "Authorization: Bearer test-token-123" http://localhost:${PRIMARY_STATUS_PORT}/pocket/status)
     if [ "$HTTP_CODE" = "200" ]; then
         ((SUCCESS++))
     elif [ "$HTTP_CODE" = "429" ]; then
@@ -562,7 +567,7 @@ print_header "Test Suite 9: Health Check Endpoints"
 run_test
 print_test "Test /health endpoint (no auth required)"
 
-HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null http://localhost:3000/health)
+HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null http://localhost:${PRIMARY_STATUS_PORT}/health)
 print_info "Health endpoint returned: $HTTP_CODE"
 
 if [ "$HTTP_CODE" = "200" ]; then
@@ -574,7 +579,7 @@ fi
 run_test
 print_test "Test /ready endpoint (no auth required)"
 
-RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:3000/ready 2>&1)
+RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:${PRIMARY_STATUS_PORT}/ready 2>&1)
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | head -1)
 
@@ -591,7 +596,7 @@ fi
 run_test
 print_test "Test /ready on secondary instance"
 
-HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null http://localhost:4000/ready)
+HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null http://localhost:${SECONDARY_STATUS_PORT}/ready)
 print_info "Secondary ready endpoint returned: $HTTP_CODE"
 
 if [ "$HTTP_CODE" = "200" ]; then
@@ -609,9 +614,9 @@ run_test
 print_test "Verify complete state transition: ADVERTISED → VALIDATED → FAILED → RECOVERED"
 
 # Get current state
-TRACKED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-VALIDATED=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-WORKING=$(curl -s http://localhost:3000/metrics | grep 'sauron_external_endpoints_working.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+TRACKED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_tracked.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+VALIDATED=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
+WORKING=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_working.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
 
 print_info "State: Tracked=$TRACKED, Validated=$VALIDATED, Working=$WORKING"
 

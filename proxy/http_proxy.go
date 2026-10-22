@@ -402,9 +402,10 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 		)
 		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, errCategory).Inc()
 
-		// Record circuit-breaker error for WebSocket backend failures.
+		// Record circuit-breaker error for WebSocket backend failures; a client
+		// dropping its connection says nothing about the node.
 		cbCfg := p.getCircuitBreakerConfig()
-		if p.circuitBreaker != nil && cbCfg != nil {
+		if p.circuitBreaker != nil && cbCfg != nil && errCategory != "client_disconnect" {
 			p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
 		}
 	} else {

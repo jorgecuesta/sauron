@@ -44,3 +44,14 @@ make docker-down
 
 Primary discovers and validates external endpoints from Secondary's status API,
 then includes them in routing decisions alongside internal nodes.
+
+## Running alongside other services
+
+Host ports default to 3000/4000 (status), 8080-8082 and 7080-7082 (proxies) and 6379 (Redis). If something else holds them, override any of them:
+
+```bash
+SAURON_PRIMARY_STATUS_PORT=23000 SAURON_SECONDARY_STATUS_PORT=24000 SAURON_REDIS_PORT=26379 \
+SAURON_PRIMARY_API_PORT=28080 SAURON_PRIMARY_RPC_PORT=28081 SAURON_PRIMARY_GRPC_PORT=28082 \
+SAURON_SECONDARY_API_PORT=27080 SAURON_SECONDARY_RPC_PORT=27081 SAURON_SECONDARY_GRPC_PORT=27082 \
+make docker-test
+```

@@ -454,8 +454,8 @@ internals:
 		healthStore:  healthStore,
 		configLoader: loader,
 		logger:       zap.NewNop(),
-		timeout:      3 * time.Second,
 	}
+	sched.timeout.Store(int64(3 * time.Second))
 
 	return sched, healthStore
 }
@@ -513,7 +513,7 @@ func TestScheduleGRPCHealthCheck_Unhealthy(t *testing.T) {
 
 	sched, healthStore := testHealthCheckScheduler(t)
 	// Short timeout so the test doesn't hang on connection attempts.
-	sched.timeout = 500 * time.Millisecond
+	sched.timeout.Store(int64(500 * time.Millisecond))
 
 	node := config.MultiChainNode{
 		Name:         "test-node",

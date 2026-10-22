@@ -165,6 +165,15 @@ var (
 		[]string{"reason"}, // reason: invalid_token|missing_token|forbidden_type
 	)
 
+	// ConfigReloadOK is 1 when the last config load or reload was applied and 0
+	// when it was rejected, i.e. the running config no longer matches the file.
+	ConfigReloadOK = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "sauron_config_reload_ok",
+			Help: "1 if the last configuration load/reload was applied, 0 if it was rejected",
+		},
+	)
+
 	// External Ring Performance
 
 	// ExternalRingLatency tracks response time from external Sauron rings
