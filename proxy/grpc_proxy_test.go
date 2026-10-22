@@ -414,13 +414,10 @@ internals:
 func TestGRPCProxy_BackendDialError(t *testing.T) {
 	t.Parallel()
 
-	// Bind and immediately close to get a port with nothing listening.
-	deadLis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	deadAddr := deadLis.Addr().String()
-	_ = deadLis.Close()
+	// Port 1 is privileged and never bound by tests, so the dial is refused
+	// deterministically. (Binding and closing a random port raced with other
+	// parallel tests reusing it, and the "dead" backend sometimes answered.)
+	deadAddr := "127.0.0.1:1"
 
 	yaml := `
 listen: ":3000"
@@ -506,17 +503,14 @@ internals:
 		t.Fatal("expected error due to unreachable backend, got nil")
 	}
 
+	// A dead backend must surface as Unavailable (#11): client retry policies
+	// key on it, and Internal would hide a node outage as a server bug.
 	st, ok := status.FromError(err)
 	if !ok {
-		// Wrapped errors are also acceptable — just verify it's non-nil.
-		return
+		t.Fatalf("error is not a gRPC status: %v", err)
 	}
-	// Unavailable, Internal, or Unknown are all acceptable for a connection failure.
-	switch st.Code() {
-	case codes.Unavailable, codes.Internal, codes.Unknown:
-		// expected
-	default:
-		t.Errorf("unexpected gRPC status code for dial error: %s", st.Code())
+	if st.Code() != codes.Unavailable {
+		t.Errorf("code = %s (%q), want Unavailable", st.Code(), st.Message())
 	}
 }
 
@@ -960,5 +954,111 @@ func TestGetOrCreateConnection_ConcurrentAccess(t *testing.T) {
 	// Second Close must be a no-op (idempotent — H8 requirement).
 	if err := p.Close(); err != nil {
 		t.Logf("p.Close() second call returned error: %v", err)
+	}
+}
+
+// TestGRPCProxy_ClientCancelDuringStreamSetupIsNotTracked: a client that gives
+// up while the proxy is still opening the backend stream must not count
+// against the endpoint. Three such cancels would otherwise mark a healthy
+// external endpoint as not working.
+func TestGRPCProxy_ClientCancelDuringStreamSetupIsNotTracked(t *testing.T) {
+	t.Parallel()
+
+	// A backend that accepts TCP and never speaks: stream setup hangs until the
+	// client cancels.
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("silent listen: %v", err)
+	}
+	t.Cleanup(func() { _ = silent.Close() })
+	go func() {
+		for {
+			c, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	silentAddr := silent.Addr().String()
+
+	yaml := `
+listen: ":3000"
+external_failover_threshold: 2
+timeouts:
+  health_check: 5s
+  proxy: 5s
+networks:
+  - name: "testnet"
+    type: cosmos
+    height_check:
+      protocol: rpc
+      interval: 30s
+    endpoints:
+      - protocol: rpc
+        listen: ":18085"
+      - protocol: grpc
+        listen: ":18086"
+internals:
+  - name: node-1
+    network: "testnet"
+    grpc_insecure: true
+    endpoints:
+      rpc: "http://127.0.0.1:18099"
+      grpc: "127.0.0.1:1"
+`
+	cfgLoader := testutil.NewMultiChainLoader(t, yaml)
+	heightStore := storage.NewHeightStore()
+	heightStore.Update("testnet", "node-1", "rpc", 100, 10*time.Millisecond, "internal")
+	endpointStore := storage.NewExternalEndpointStore(zap.NewNop())
+	endpointStore.StoreAdvertised("partner", "https://ring.example.com", "testnet", "grpc", silentAddr)
+	endpointStore.MarkValidated("partner", "https://ring.example.com", "testnet", "grpc", silentAddr, 200, 10*time.Millisecond)
+	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
+	grpcProxy := NewGRPCProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "testnet", nil)
+
+	proxyLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("proxy listen: %v", err)
+	}
+	proxySrv := grpcProxy.GetServer()
+	go func() { _ = proxySrv.Serve(proxyLis) }()
+	t.Cleanup(proxySrv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:///"+proxyLis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(&rawCodec{})),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true, ClientStreams: true}, "/test.Service/Setup")
+		if err == nil {
+			_ = stream.SendMsg(&rawFrame{payload: []byte("ping")})
+			var resp rawFrame
+			_ = stream.RecvMsg(&resp)
+		}
+		cancel()
+	}
+
+	// The proxy handler finishes asynchronously after the client cancels.
+	deadline := time.Now().Add(time.Second)
+	for {
+		eps := endpointStore.GetValidatedEndpoints("testnet", "grpc")
+		if len(eps) == 1 && eps[0].ErrorCount == 0 {
+			if time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if len(eps) == 0 {
+			t.Fatalf("external endpoint marked not working after 3 client cancels")
+		}
+		t.Fatalf("external endpoint error count = %d, want 0 after client cancels", eps[0].ErrorCount)
 	}
 }

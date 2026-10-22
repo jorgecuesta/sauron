@@ -295,12 +295,32 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		ClientStreams: true,
 	}, method)
 	if err != nil {
+		if clientErr := stream.Context().Err(); clientErr != nil {
+			// The client left while the backend stream was being opened: not
+			// the endpoint's fault. Recorded like any other finished call.
+			clientStatus := status.FromContextError(clientErr)
+			statusStr := strconv.Itoa(int(clientStatus.Code()))
+			metrics.ProxyRequestDuration.WithLabelValues(p.network, nodeName, "grpc", statusStr).Observe(time.Since(start).Seconds())
+			metrics.NodeRequests.WithLabelValues(p.network, nodeName, "grpc", normalizeGRPCMethod(method)).Inc()
+			metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", statusStr, originClient).Inc()
+			p.logger.Debug("Client cancelled during gRPC stream setup",
+				zap.String("method", method),
+				zap.Error(clientErr),
+			)
+			return clientStatus.Err()
+		}
 		p.logger.Error("Failed to create client stream",
 			zap.String("method", method),
 			zap.Error(err),
 		)
 		metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", "unavailable", "stream_error").Inc()
-		return status.Errorf(codes.Internal, "failed to create stream: %v", err)
+		// The backend cannot be reached: that is Unavailable (clients retry on
+		// it), not Internal, and it counts against the endpoint like any other
+		// backend failure. Dial details stay in the log.
+		if p.endpointStore != nil {
+			p.endpointStore.TrackProxyError(p.network, "grpc", targetAddr)
+		}
+		return status.Error(codes.Unavailable, "backend unavailable")
 	}
 
 	p.logger.Debug("Proxying gRPC to backend",
