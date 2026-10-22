@@ -511,7 +511,6 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	return proxyErr
 }
 
-// shouldUseInsecureForNode determines if we should use insecure connection for a specific node
 // recordBreakerError counts a backend failure of nodeName against the
 // circuit breaker, when the proxy has one and the network configures it.
 func (p *GRPCProxy) recordBreakerError(nodeName string) {
@@ -541,6 +540,7 @@ func (p *GRPCProxy) recordBreakerOutcome(nodeName string, code codes.Code) {
 	p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
 }
 
+// shouldUseInsecureForNode determines if we should use insecure connection for a specific node
 func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
 	cfg := p.configLoader.Get()
 	// Check internal nodes
@@ -564,7 +564,6 @@ func normalizeGRPCMethod(method string) string {
 	return s
 }
 
-// Close closes all pooled connections. It is idempotent; subsequent calls are no-ops.
 // CloseConnectionsExcept closes and drops every pooled backend connection
 // whose address keep rejects (a node removed or moved to another URL), and
 // returns how many it closed. Streams still open on such a connection fail.
@@ -597,6 +596,7 @@ func (p *GRPCProxy) PooledAddresses() []string {
 	return addrs
 }
 
+// Close closes all pooled connections. It is idempotent; subsequent calls are no-ops.
 func (p *GRPCProxy) Close() error {
 	var closeErr error
 	p.closeOnce.Do(func() {
