@@ -1,0 +1,62 @@
+name: Mutation testing
+
+# Nightly mutation testing (gremlins, pinned in the Makefile): which code
+# changes the tests fail to catch. The per-package report goes to the job
+# summary, the JSON reports to an artifact.
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    name: Mutation testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run gremlins
+        run: make mutation MUTATION_DIR=mutation-reports
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Mutation testing"
+            echo
+            echo "| Package | Efficacy | Killed | Lived | Not covered |"
+            echo "|---|---|---|---|---|"
+            for f in mutation-reports/*.json; do
+              [ -e "$f" ] || continue
+              jq -r --arg p "$(basename "$f" .json | tr _ /)" \
+                '"| \($p) | \(.test_efficacy | floor)% | \(.mutants_killed) | \(.mutants_lived) | \(.mutants_not_covered) |"' "$f"
+            done
+            echo
+            echo "### Survivors"
+            echo
+            for f in mutation-reports/*.json; do
+              [ -e "$f" ] || continue
+              jq -r --arg p "$(basename "$f" .json | tr _ /)" \
+                '.files[] | .file_name as $file | .mutations[] | select(.status == "LIVED")
+                 | "- \($p)/\($file):\(.line):\(.column) \(.type)"' "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-reports
+          path: mutation-reports/
+          retention-days: 30
