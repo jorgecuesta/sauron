@@ -47,3 +47,13 @@ Mark each claim as **measured**, **verified in code**, or **not verified**.
     - the `s.timeout` write race fixed.
   - 2c is relay-miner side and coordinated through Jorge. The candidate is moving the miner's poll from `Status` to `ABCIInfo.LastBlockHeight` (`client/block_subscriber.go:464`).
 - **Done when:** ≥99.5% of blocks pass the causal probe (gRPC height ≥ H) over ≥200 blocks on beta. A miner load run of the same size as the 16-case baseline has 0 out-of-window rejections, with the denominator recorded.
+
+## 3. Pre-existing issues found by the 2026-10-22 config audit (not yet fixed)
+
+All verified in code by a read-only audit; none measured at runtime.
+
+- **Data race:** `MultiChainScheduler.timeout` is written from several cron goroutines without a lock (`checker/v2_scheduler.go:84, 157, 368, 412`), and the oracle cron reads it. Fix first: it is a concurrency bug.
+- **Removed or renamed internal nodes are never forgotten.** Height and health stores have no delete (`storage/heights.go`, `storage/health.go`), so the selector keeps picking the old name. HTTP then skips it and uses up a retry (`proxy/http_proxy.go:139-146`); gRPC returns `Internal` (`proxy/grpc_proxy.go`).
+- **A node URL change leaks the old pooled gRPC connection** until shutdown (`GRPCProxy.connPool`, `ExternalChecker.grpcConnections`).
+- **Removed externals and rings stay routable.** `ExternalEndpointStore` has no delete.
+- **Config fields that are accepted but read by nothing:** `height_check.interval` (the cron is fixed at 30s; item 2b), `archival.check_interval`, `sync.check_interval`, `circuit_breaker.grpc_codes`.
