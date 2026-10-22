@@ -154,11 +154,12 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 		clientSide := res.clientSide
 		if res.backendToClient {
 			// A splice error does not say which socket failed. A client that went
-			// away also fails the client->backend read at once; a dead backend
-			// leaves that read blocked on a healthy client.
+			// away also ends the client->backend read at once, with an error (reset)
+			// or EOF (a plain FIN); a dead backend leaves that read blocked on a
+			// healthy client.
 			select {
 			case other := <-errChan:
-				clientSide = other.clientSide
+				clientSide = other.clientSide || other.err == nil || other.err == io.EOF
 			case <-time.After(wsClassifyWait):
 			}
 		}

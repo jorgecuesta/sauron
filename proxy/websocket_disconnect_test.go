@@ -219,3 +219,65 @@ internals:
 		})
 	}
 }
+
+// wsFloodBackend upgrades and then writes continuously until the write fails,
+// like a node pushing subscription events.
+func wsFloodBackend(t *testing.T) *httptest.Server {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		msg := make([]byte, 1024)
+		for {
+			if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestProxyWebSocket_ClientGracefulCloseDuringPush: a client that closes its
+// TCP connection normally (FIN, no WebSocket close frame) while the backend is
+// still pushing is a client disconnect, not a backend failure.
+func TestProxyWebSocket_ClientGracefulCloseDuringPush(t *testing.T) {
+	t.Parallel()
+
+	backend := wsFloodBackend(t)
+	resultCh := make(chan error, 1)
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop())
+		resultCh <- err
+	}))
+	t.Cleanup(proxySrv.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+proxySrv.URL[len("http"):]+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("first message: %v", err)
+	}
+	_ = conn.UnderlyingConn().Close() // plain FIN, no close frame
+
+	select {
+	case err := <-resultCh:
+		if err == nil {
+			return // a clean end is acceptable
+		}
+		var wsErr *WSProxyError
+		if !errors.As(err, &wsErr) {
+			t.Fatalf("err = %v, want *WSProxyError", err)
+		}
+		if wsErr.Category != "client_disconnect" {
+			t.Errorf("category = %q, want client_disconnect (err: %v)", wsErr.Category, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProxyWebSocket did not return")
+	}
+}
