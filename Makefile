@@ -1,10 +1,17 @@
-.PHONY: build fmt lint test clean docker-test docker-test-advanced docker-up docker-down help
+.PHONY: build fmt fmt-check lint test ci clean docker-test docker-test-advanced docker-up docker-down help
 
 # Variables
 BINARY_NAME=sauron
 GO=go
 GOFLAGS=-v
 DOCKER_DIR=.docker
+
+# Tool versions are pinned and run through `go run`, so every machine and CI
+# use the same linters, built with the Go toolchain this module requires.
+GOLANGCI_LINT_VERSION ?= v2.14.0
+GOIMPORTS_VERSION ?= v0.51.0
+GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+GOIMPORTS = $(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
 
 # Default target
 all: fmt lint build
@@ -14,35 +21,30 @@ build:
 	@echo "Building $(BINARY_NAME)..."
 	$(GO) build $(GOFLAGS) -o bin/$(BINARY_NAME) .
 
-## fmt: Format Go code
+## fmt: Format Go code (gofmt -s + goimports)
 fmt:
 	@echo "Formatting code..."
-	$(GO) fmt ./...
 	gofmt -s -w .
-	@if [ -f ~/go/bin/goimports ]; then \
-		~/go/bin/goimports -w .; \
-	elif command -v goimports >/dev/null 2>&1; then \
-		goimports -w .; \
-	else \
-		echo "goimports not found, skipping import organization"; \
-	fi
+	$(GOIMPORTS) -w $$(git ls-files '*.go')
 
-## lint: Run linters
+## fmt-check: Fail if gofmt or goimports would change any file
+fmt-check:
+	@echo "Checking formatting..."
+	@out=$$(gofmt -s -l .); if [ -n "$$out" ]; then echo "gofmt would reformat:"; echo "$$out"; exit 1; fi
+	@out=$$($(GOIMPORTS) -l $$(git ls-files '*.go')); if [ -n "$$out" ]; then echo "goimports would reformat:"; echo "$$out"; exit 1; fi
+
+## lint: Run golangci-lint (pinned version)
 lint:
 	@echo "Running linters..."
-	@if [ -f ~/go/bin/golangci-lint ]; then \
-		~/go/bin/golangci-lint run ./...; \
-	elif command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run ./...; \
-	else \
-		echo "golangci-lint not found, running go vet instead..."; \
-		$(GO) vet ./...; \
-	fi
+	$(GOLANGCI_LINT) run --timeout=5m ./...
 
-## test: Run unit tests
+## test: Run all tests with the race detector
 test:
 	@echo "Running tests..."
-	$(GO) test -v ./...
+	$(GO) test -race -count=1 ./...
+
+## ci: Run every check CI runs (tests, lint, format)
+ci: test lint fmt-check
 
 ## clean: Remove built binaries
 clean:
