@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -17,7 +18,8 @@ import (
 type WSProxyError struct {
 	// Category matches the original metric error labels:
 	// "backend_connect_error", "upgrade_forward_error",
-	// "upgrade_response_error", "upgrade_client_error", "websocket_error".
+	// "upgrade_response_error", "upgrade_client_error", "websocket_error",
+	// "client_disconnect" (the client dropped the connection; not a node failure).
 	Category   string
 	StatusCode int
 	Err        error
@@ -128,9 +130,10 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 	)
 
 	// Bidirectional copy: use the buffered readers (clientBuf, backendBuf)
-	// so bytes already read during handshake are not lost. Each direction
-	// records whether it failed on the client's connection, so a client that
-	// drops off is not reported as a backend failure.
+	// so bytes already read during handshake are not lost.
+	// Client->backend records failures reading the client; its source is a
+	// bufio reader, so wrapping it costs no zero-copy path. Backend->client is
+	// left unwrapped so io.Copy keeps the splice fast path into clientConn.
 	errChan := make(chan wsCopyResult, 2)
 
 	go func() {
@@ -140,17 +143,27 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 		errChan <- wsCopyResult{err: copyErr, clientSide: src.err != nil}
 	}()
 	go func() {
-		dst := &clientWriteRecorder{w: clientConn}
-		n, copyErr := io.Copy(dst, backendBuf)
+		n, copyErr := io.Copy(clientConn, backendBuf)
 		logger.Debug("Backend->Client copy finished", zap.Int64("bytes", n), zap.Error(copyErr))
-		errChan <- wsCopyResult{err: copyErr, clientSide: dst.err != nil}
+		errChan <- wsCopyResult{err: copyErr, backendToClient: true}
 	}()
 
 	// Wait for one direction to finish.
 	res := <-errChan
 	if res.err != nil && res.err != io.EOF {
+		clientSide := res.clientSide
+		if res.backendToClient {
+			// A splice error does not say which socket failed. A client that went
+			// away also fails the client->backend read at once; a dead backend
+			// leaves that read blocked on a healthy client.
+			select {
+			case other := <-errChan:
+				clientSide = other.clientSide
+			case <-time.After(wsClassifyWait):
+			}
+		}
 		category := "websocket_error"
-		if res.clientSide {
+		if clientSide {
 			category = "client_disconnect"
 		}
 		return resp.StatusCode, &WSProxyError{Category: category, StatusCode: resp.StatusCode, Err: res.err}
@@ -158,11 +171,15 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 	return resp.StatusCode, nil
 }
 
-// wsCopyResult is how one copy direction ended; clientSide is true when it
-// failed reading from or writing to the client's connection.
+// wsClassifyWait bounds how long a failed backend->client copy waits for the
+// client->backend side to show whether the client is gone.
+const wsClassifyWait = 100 * time.Millisecond
+
+// wsCopyResult is how one copy direction ended.
 type wsCopyResult struct {
-	err        error
-	clientSide bool
+	err             error
+	clientSide      bool // failed reading the client (client->backend only)
+	backendToClient bool
 }
 
 // clientReadRecorder records a non-EOF error from reading the client.
@@ -174,20 +191,6 @@ type clientReadRecorder struct {
 func (c *clientReadRecorder) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	if err != nil && err != io.EOF {
-		c.err = err
-	}
-	return n, err
-}
-
-// clientWriteRecorder records an error from writing to the client.
-type clientWriteRecorder struct {
-	w   io.Writer
-	err error
-}
-
-func (c *clientWriteRecorder) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	if err != nil {
 		c.err = err
 	}
 	return n, err
