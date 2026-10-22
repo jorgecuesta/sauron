@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -305,5 +306,56 @@ func TestHTTPProxy_OversizedBodyRejectedEarly(t *testing.T) {
 		if got := bodyTooLargeCount(network) - before; got != tc.wantCountDiff {
 			t.Errorf("%s: body_too_large count +%v, want +%v", tc.name, got, tc.wantCountDiff)
 		}
+	}
+}
+
+// A refused upgrade whose body has no length (read until close) must not hang
+// the handler on a backend that keeps the connection open.
+func TestProxyWebSocket_RejectionBodyWithoutLengthDoesNotHang(t *testing.T) {
+	t.Parallel()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+	go func() {
+		c, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = c.Read(buf) // the upgrade request
+		_, _ = c.Write([]byte("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nnode is starting"))
+		time.Sleep(10 * time.Second) // keep the connection open
+	}()
+
+	resultCh := make(chan error, 1)
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := ProxyWebSocket(w, r, "http://"+lis.Addr().String(), zap.NewNop(), 0)
+		resultCh <- err
+	}))
+	t.Cleanup(proxySrv.Close)
+
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, proxySrv.URL+"/websocket", nil)
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case err := <-resultCh:
+		var wsErr *WSProxyError
+		if !errors.As(err, &wsErr) || wsErr.Category != "upgrade_rejected" || wsErr.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("err = %v, want upgrade_rejected with 503", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProxyWebSocket still blocked 5s after a refused upgrade with an open-ended body")
 	}
 }

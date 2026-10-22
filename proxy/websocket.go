@@ -128,19 +128,26 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 		return 502, &WSProxyError{Category: "upgrade_response_error", StatusCode: 502, Err: err}
 	}
 
-	// Forward the response to the client.
-	if err := resp.Write(clientConn); err != nil {
-		return 502, &WSProxyError{Category: "upgrade_client_error", StatusCode: 502, Err: err}
-	}
-
-	// Anything but 101 means the backend refused the WebSocket: the client has
-	// its answer, and there is no connection to copy.
+	// Anything but 101 means the backend refused the WebSocket: forward its
+	// answer and stop, there is no connection to copy. Its body may have no
+	// length (read until close), so reading it is bounded in time and size.
 	if resp.StatusCode != http.StatusSwitchingProtocols {
+		_ = backendConn.SetReadDeadline(time.Now().Add(wsRejectionReadTimeout))
+		resp.Body = io.NopCloser(io.LimitReader(resp.Body, wsRejectionMaxBody))
+		resp.Close = true
+		if err := resp.Write(clientConn); err != nil {
+			logger.Debug("Forwarding a refused WebSocket upgrade ended early", zap.Error(err))
+		}
 		return resp.StatusCode, &WSProxyError{
 			Category:   "upgrade_rejected",
 			StatusCode: resp.StatusCode,
 			Err:        errors.New("backend refused the WebSocket upgrade: " + resp.Status),
 		}
+	}
+
+	// Forward the 101 to the client.
+	if err := resp.Write(clientConn); err != nil {
+		return 502, &WSProxyError{Category: "upgrade_client_error", StatusCode: 502, Err: err}
 	}
 
 	logger.Debug("WebSocket upgrade successful, starting bidirectional copy",
@@ -192,6 +199,13 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 	}
 	return resp.StatusCode, nil
 }
+
+// wsRejectionReadTimeout and wsRejectionMaxBody bound how long and how much of
+// a refused upgrade's body is forwarded.
+const (
+	wsRejectionReadTimeout = 2 * time.Second
+	wsRejectionMaxBody     = 64 << 10
+)
 
 // wsClassifyWait bounds how long a failed backend->client copy waits for the
 // client->backend side to show whether the client is gone.
