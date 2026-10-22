@@ -111,6 +111,7 @@ func (s *ExternalEndpointStore) MarkValidated(externalName, ringURL, network, en
 	}
 
 	wasValidated := ep.IsValidated
+	wasFailed := ep.IsValidated && !ep.IsWorking
 	ep.IsValidated = true
 	ep.IsWorking = true
 	ep.ErrorCount = 0
@@ -118,7 +119,19 @@ func (s *ExternalEndpointStore) MarkValidated(externalName, ringURL, network, en
 	ep.Height = height
 	ep.Latency = latency
 
-	if !wasValidated {
+	if wasFailed {
+		// FAILED -> working is a recovery, whichever check saw it first (the
+		// recovery loop or the ring's own revalidation).
+		metrics.ExternalEndpointRecoveries.WithLabelValues(network, endpointType, externalName).Inc()
+		s.logger.Info("Failed endpoint has recovered",
+			zap.String("external", externalName),
+			zap.String("ring", ringURL),
+			zap.String("network", network),
+			zap.String("type", endpointType),
+			zap.String("url", url),
+			zap.Duration("latency", latency),
+		)
+	} else if !wasValidated {
 		s.logger.Info("Endpoint validated successfully",
 			zap.String("external", externalName),
 			zap.String("ring", ringURL),
@@ -154,9 +167,15 @@ func (s *ExternalEndpointStore) MarkValidationFailed(externalName, ringURL, netw
 		return
 	}
 
-	ep.IsValidated = false
+	// An endpoint that had passed validation is now FAILED: still validated,
+	// so the recovery loop re-checks it, but not working. One that never
+	// passed stays unvalidated.
 	ep.IsWorking = false
 	ep.LastError = time.Now()
+	if ep.IsValidated {
+		ep.ErrorCount++
+		metrics.ExternalEndpointErrorCount.WithLabelValues(network, endpointType, url).Set(float64(ep.ErrorCount))
+	}
 
 	s.logger.Warn("Endpoint validation failed",
 		zap.String("external", externalName),
@@ -307,4 +326,20 @@ func (s *ExternalEndpointStore) UpdateAggregateMetrics() {
 		metrics.ExternalEndpointsValidated.WithLabelValues(k.network, k.typ, k.external).Set(float64(count.validated))
 		metrics.ExternalEndpointsWorking.WithLabelValues(k.network, k.typ, k.external).Set(float64(count.working))
 	}
+}
+
+// EndpointsForRing returns copies of every endpoint externalName's ringURL
+// advertised for network, whatever its state.
+func (s *ExternalEndpointStore) EndpointsForRing(externalName, ringURL, network string) []*ExternalEndpoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var eps []*ExternalEndpoint
+	for _, ep := range s.endpoints {
+		if ep.ExternalName == externalName && ep.RingURL == ringURL && ep.Network == network {
+			epCopy := *ep
+			eps = append(eps, &epCopy)
+		}
+	}
+	return eps
 }

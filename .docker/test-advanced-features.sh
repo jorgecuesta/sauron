@@ -265,26 +265,28 @@ fi
 run_test
 print_test "Verify primary detects recovery"
 
-# Poll for recovery instead of fixed sleep — gRPC validation can take longer
+# Poll for recovery instead of fixed sleep — gRPC validation can take longer.
+# Recovery means working again: a FAILED endpoint stays "validated" (so the
+# recovery loop re-checks it), so the validated gauge never drops in an outage.
 print_info "Polling for endpoint recovery (max 60s)..."
 TIMEOUT=60
 ELAPSED=0
-VALIDATED_AFTER=0
+WORKING_AFTER=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    VALIDATED_AFTER=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-    VALIDATED_AFTER=${VALIDATED_AFTER:-0}
-    if [ "$VALIDATED_AFTER" -ge 3 ]; then
+    WORKING_AFTER=$(metric_sum sauron_external_endpoints_working secondary-ring)
+    WORKING_AFTER=${WORKING_AFTER:-0}
+    if [ "$WORKING_AFTER" -ge 3 ]; then
         break
     fi
     sleep 5
     ((ELAPSED+=5))
 done
 
-if [ "$VALIDATED_AFTER" -ge 3 ]; then
-    print_pass "All 3 endpoint types recovered and re-validated after ${ELAPSED}s"
+if [ "$WORKING_AFTER" -ge 3 ]; then
+    print_pass "All 3 endpoint types recovered and working again after ${ELAPSED}s"
     docker logs sauron-primary 2>&1 | tail -30 | grep -i "recovered\|validated successfully" | tail -3
 else
-    print_fail "Not all endpoints recovered (validated: $VALIDATED_AFTER/3 after ${TIMEOUT}s)"
+    print_fail "Not all endpoints recovered (working: $WORKING_AFTER/3 after ${TIMEOUT}s)"
 fi
 
 run_test

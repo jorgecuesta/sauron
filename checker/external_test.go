@@ -7,12 +7,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"sauron/config"
 	"sauron/internal/testutil"
+	"sauron/metrics"
 	"sauron/storage"
 
 	"go.uber.org/zap"
@@ -351,9 +355,12 @@ func TestQueryRing_EndpointValidationFailed(t *testing.T) {
 		t.Errorf("expected 0 validated endpoints (endpoint is down), got %d", len(validated))
 	}
 
-	// But failed endpoints should show the endpoint since StoreAdvertised was called
-	// followed by MarkValidationFailed. GetFailedEndpoints only returns IsValidated&&!IsWorking,
-	// and fresh endpoints start IsValidated=false — so neither list contains it. That's fine.
+	// Nor in the failed list: an endpoint that never passed validation is not
+	// FAILED (GetFailedEndpoints returns IsValidated && !IsWorking), so the
+	// recovery loop leaves it to the next ring query.
+	if failed := endpointStore.GetFailedEndpoints(); len(failed) != 0 {
+		t.Errorf("never-validated endpoint listed for recovery: %+v", failed)
+	}
 }
 
 // ─── CheckExternal tests ──────────────────────────────────────────────────────
@@ -667,11 +674,10 @@ func TestValidateHTTPEndpoint_BadURL(t *testing.T) {
 // IsWorking==false. This state is reached by:
 //  1. StoreAdvertised  → IsValidated=false, IsWorking=false
 //  2. MarkValidated    → IsValidated=true,  IsWorking=true
-//  3. Three TrackProxyError calls → IsWorking=false (after ≥3 errors)
+//  3. Three TrackProxyError calls → IsWorking=false (after ≥3 errors), or a
+//     single MarkValidationFailed on the validated endpoint.
 //
-// Note: MarkValidationFailed sets IsValidated=false, so it does NOT produce a
-// "failed-but-recoverable" endpoint. Only TrackProxyError demotes to
-// IsWorking=false while keeping IsValidated=true.
+// This helper uses the proxy-error path.
 func seedFailedEndpoint(t *testing.T, endpointStore *storage.ExternalEndpointStore, externalName, ringURL, network, epType, url string, height int64) {
 	t.Helper()
 	endpointStore.StoreAdvertised(externalName, ringURL, network, epType, url)
@@ -985,5 +991,138 @@ func TestExternalStatusResponse_EmptyEndpointURL(t *testing.T) {
 	all := endpointStore.GetValidatedEndpoints("pocket", "rest")
 	if len(all) != 0 {
 		t.Errorf("expected 0 endpoints for empty URL, got %d", len(all))
+	}
+}
+
+// ─── ring outage (#17) ────────────────────────────────────────────────────────
+
+// Ring behaviours for TestCheckExternal_RingDown*.
+const (
+	ringOK int32 = iota
+	ringHTTP503
+	ringBadJSON
+	ringZeroHeight
+	ringRefused // the ring's server is closed
+)
+
+// toggleServer answers HEAD/GET with 200 while up, 503 otherwise.
+func toggleServer(t *testing.T, up *atomic.Bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if up.Load() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func recoveries(network, epType, external string) float64 {
+	var m dto.Metric
+	_ = metrics.ExternalEndpointRecoveries.WithLabelValues(network, epType, external).Write(&m)
+	return m.GetCounter().GetValue()
+}
+
+// TestCheckExternal_RingDownRevalidatesItsEndpoints: when a ring stops
+// answering, the endpoints it advertised are validated again instead of
+// staying routable on their last result. A dead one is marked failed (with
+// its error count), and recovers once it answers, even while the ring is down.
+func TestCheckExternal_RingDownRevalidatesItsEndpoints(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []int32{ringHTTP503, ringBadJSON, ringZeroHeight, ringRefused} {
+		t.Run(fmt.Sprintf("ring mode %d", mode), func(t *testing.T) {
+			t.Parallel()
+			var epUp atomic.Bool
+			epUp.Store(true)
+			epSrv := toggleServer(t, &epUp)
+
+			var ringMode atomic.Int32
+			ringSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch ringMode.Load() {
+				case ringHTTP503:
+					w.WriteHeader(http.StatusServiceUnavailable)
+				case ringBadJSON:
+					_, _ = w.Write([]byte("{not json"))
+				case ringZeroHeight:
+					newStatusHandler(0, map[string]string{"rest": epSrv.URL})(w, r)
+				default:
+					newStatusHandler(100, map[string]string{"rest": epSrv.URL})(w, r)
+				}
+			}))
+			t.Cleanup(ringSrv.Close)
+
+			external := "ring-down-" + strconv.Itoa(int(mode))
+			checker, _, endpointStore := newTestExternalChecker(t, nil)
+			ext := config.External{Name: external, Rings: []string{ringSrv.URL}}
+			ctx := context.Background()
+
+			_ = checker.CheckExternal(ctx, ext, "pocket")
+			if n := len(endpointStore.GetValidatedEndpoints("pocket", "rest")); n != 1 {
+				t.Fatalf("validated endpoints with the ring up = %d, want 1", n)
+			}
+
+			// The ring goes down, and so does its endpoint.
+			if mode == ringRefused {
+				ringSrv.Close()
+			} else {
+				ringMode.Store(mode)
+			}
+			epUp.Store(false)
+			_ = checker.CheckExternal(ctx, ext, "pocket")
+
+			if n := len(endpointStore.GetValidatedEndpoints("pocket", "rest")); n != 0 {
+				t.Fatalf("dead endpoint of a dead ring still routable (%d validated)", n)
+			}
+			failed := endpointStore.GetFailedEndpoints()
+			if len(failed) != 1 || failed[0].URL != epSrv.URL || failed[0].ErrorCount != 1 {
+				t.Fatalf("failed endpoints = %+v, want the endpoint with ErrorCount 1", failed)
+			}
+
+			// The endpoint answers again while the ring is still down.
+			epUp.Store(true)
+			before := recoveries("pocket", "rest", external)
+			checker.RecoverFailedEndpoints(ctx)
+			if n := len(endpointStore.GetValidatedEndpoints("pocket", "rest")); n != 1 {
+				t.Errorf("recovered endpoint not routable (%d validated)", n)
+			}
+			if d := recoveries("pocket", "rest", external) - before; d != 1 {
+				t.Errorf("recoveries +%v, want +1", d)
+			}
+		})
+	}
+}
+
+// A ring that is down does not fail endpoints that still answer.
+func TestCheckExternal_RingDownKeepsLiveEndpoints(t *testing.T) {
+	t.Parallel()
+	var epUp atomic.Bool
+	epUp.Store(true)
+	epSrv := toggleServer(t, &epUp)
+	var ringUp atomic.Bool
+	ringUp.Store(true)
+	ringSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ringUp.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		newStatusHandler(100, map[string]string{"rest": epSrv.URL})(w, r)
+	}))
+	t.Cleanup(ringSrv.Close)
+
+	checker, _, endpointStore := newTestExternalChecker(t, nil)
+	ext := config.External{Name: "ring-down-live", Rings: []string{ringSrv.URL}}
+	_ = checker.CheckExternal(context.Background(), ext, "pocket")
+	ringUp.Store(false)
+	_ = checker.CheckExternal(context.Background(), ext, "pocket")
+
+	eps := endpointStore.GetValidatedEndpoints("pocket", "rest")
+	if len(eps) != 1 || eps[0].Height != 100 {
+		t.Errorf("validated = %+v, want the live endpoint kept at its last height 100", eps)
+	}
+	if len(endpointStore.GetFailedEndpoints()) != 0 {
+		t.Error("live endpoint marked failed because its ring is down")
 	}
 }
