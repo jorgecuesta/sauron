@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # Host ports (override to run while something else holds the defaults).
+# Compose command (Compose v2 plugin by default; GitHub runners have no docker-compose v1).
+COMPOSE="${COMPOSE:-docker compose}"
 PRIMARY_STATUS_PORT="${SAURON_PRIMARY_STATUS_PORT:-3000}"
 SECONDARY_STATUS_PORT="${SAURON_SECONDARY_STATUS_PORT:-4000}"
 PRIMARY_API_PORT="${SAURON_PRIMARY_API_PORT:-8080}"
@@ -51,7 +53,7 @@ run_test() {
 # Cleanup function
 cleanup() {
     print_header "Cleaning Up"
-    docker-compose down -v 2>/dev/null || true
+    ${COMPOSE} down -v 2>/dev/null || true
     echo "Cleanup complete"
 }
 
@@ -74,12 +76,12 @@ print_test "Starting containers with docker-compose"
 
 # First ensure images are built
 print_info "Building Docker images (this may take a few minutes on first run)..."
-if ! docker-compose build 2>&1 | tail -5; then
+if ! ${COMPOSE} build 2>&1 | tail -5; then
     print_fail "Failed to build Docker images"
     exit 1
 fi
 
-if docker-compose up -d 2>&1 | tail -10; then
+if ${COMPOSE} up -d 2>&1 | tail -10; then
     print_pass "Docker Compose started successfully"
 else
     print_fail "Failed to start Docker Compose"
