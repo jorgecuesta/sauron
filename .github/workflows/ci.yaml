@@ -72,9 +72,26 @@ jobs:
       - name: Check gofmt and goimports (versions pinned in Makefile)
         run: make fmt-check
 
+  l3-protocols:
+    name: L3 Protocols and Failover (fake nodes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run deterministic L3 suite (REST, RPC GET/POST, WebSocket, gRPC, failover)
+        run: make docker-test-protocols
+
   build-and-push:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [go-test, go-lint, go-fmt-check]
+    needs: [go-test, go-lint, go-fmt-check, l3-protocols]
     runs-on: ubuntu-latest
     permissions:
       contents: write

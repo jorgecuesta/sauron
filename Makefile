@@ -1,4 +1,4 @@
-.PHONY: build fmt fmt-check lint test ci clean docker-test docker-test-advanced docker-up docker-down help
+.PHONY: build fmt fmt-check lint test ci clean docker-test docker-test-advanced docker-test-protocols docker-up docker-down help
 
 # Variables
 BINARY_NAME=sauron
@@ -58,12 +58,12 @@ clean:
 ## docker-up: Start Docker Compose environment
 docker-up:
 	@echo "Starting Docker environment..."
-	cd $(DOCKER_DIR) && docker-compose up -d
+	cd $(DOCKER_DIR) && docker compose up -d
 
 ## docker-down: Stop Docker Compose environment
 docker-down:
 	@echo "Stopping Docker environment..."
-	cd $(DOCKER_DIR) && docker-compose down -v
+	cd $(DOCKER_DIR) && docker compose down -v
 
 ## docker-test: Run external validation tests
 docker-test:
@@ -74,6 +74,11 @@ docker-test:
 docker-test-advanced:
 	@echo "Running advanced feature tests..."
 	cd $(DOCKER_DIR) && ./test-advanced-features.sh
+
+## docker-test-protocols: Deterministic L3 suite against fake nodes (no network; runs in CI)
+docker-test-protocols:
+	@echo "Running protocol and failover tests against fake nodes..."
+	cd $(DOCKER_DIR) && ./test-protocols.sh
 
 ## help: Show this help message
 help:
