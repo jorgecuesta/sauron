@@ -273,3 +273,34 @@ func TestServer_ReconcileSecondPassCatchesLateWrites(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// The delayed second pass does not run once the server has shut down, and
+// Shutdown can be called twice.
+func TestServer_ReconcileSecondPassSkippedAfterShutdown(t *testing.T) {
+	addrA, addrB := startEchoBackend(t), startEchoBackend(t)
+	path := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(path, []byte(reconcileConfig(addrA, addrB, true, false)), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.watchConfig()
+	if err := os.WriteFile(path, []byte(reconcileConfig(addrA, addrB, false, false)), 0o600); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if err := s.configLoader.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	s.Shutdown()
+	s.Shutdown() // idempotent
+
+	// Written after shutdown: no second pass may remove it.
+	time.Sleep(300 * time.Millisecond) // let any watcher reload settle
+	s.store.Update("pocket", "node-b", "rpc", 100, time.Millisecond, "internal")
+	time.Sleep(2500 * time.Millisecond) // past health_check 1s + 1s grace
+	if _, ok := s.store.GetByNetwork("pocket", "rpc")["node-b"]; !ok {
+		t.Error("the second reconciliation pass ran after Shutdown")
+	}
+}

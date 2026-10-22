@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,7 +53,9 @@ type Server struct {
 	grpcServers    []*grpc.Server     // All gRPC proxy servers
 	grpcProxies    []*proxy.GRPCProxy // All gRPC proxy instances (for Close)
 	errCh          chan error         // Fatal errors from background goroutines
-	sigCh          chan os.Signal     // SIGHUP from New on; SIGTERM/SIGINT added by WaitForShutdown
+	stopping       chan struct{}      // closed when Shutdown starts
+	shutdownOnce   sync.Once
+	sigCh          chan os.Signal // SIGHUP from New on; SIGTERM/SIGINT added by WaitForShutdown
 }
 
 // New creates a new Sauron server
@@ -196,6 +199,7 @@ func New(configPath string) (*Server, error) {
 		oracleChecker:  oracleChecker,
 		circuitBreaker: cb,
 		errCh:          make(chan error, 10),
+		stopping:       make(chan struct{}),
 	}, nil
 }
 
@@ -293,11 +297,26 @@ func (s *Server) Start() error {
 // again once the health-check timeout has passed and no such check can be left.
 func (s *Server) watchConfig() {
 	s.configLoader.OnReload(func(cfg *config.MultiChainConfig) {
+		if s.isStopping() {
+			return
+		}
 		s.reconcile(cfg)
 		time.AfterFunc(cfg.Timeouts.HealthCheck+time.Second, func() {
-			s.reconcile(s.configLoader.Get())
+			if !s.isStopping() {
+				s.reconcile(s.configLoader.Get())
+			}
 		})
 	})
+}
+
+// isStopping reports whether Shutdown has started.
+func (s *Server) isStopping() bool {
+	select {
+	case <-s.stopping:
+		return true
+	default:
+		return false
+	}
 }
 
 // reconcile drops what cfg no longer configures: removed internal nodes
@@ -487,8 +506,14 @@ func (s *Server) waitForSignals(sigCh <-chan os.Signal) {
 	}
 }
 
-// Shutdown performs graceful shutdown
+// Shutdown performs graceful shutdown. It is idempotent: later calls do nothing.
 func (s *Server) Shutdown() {
+	s.shutdownOnce.Do(s.shutdown)
+}
+
+// shutdown stops everything; Shutdown runs it once.
+func (s *Server) shutdown() {
+	close(s.stopping)
 	s.logger.Info("The Dark Tower falls... performing graceful shutdown")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
