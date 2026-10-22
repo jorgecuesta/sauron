@@ -8,8 +8,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/encoding"
-	"google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -58,9 +56,7 @@ func newGRPCAnswerBackend(t *testing.T, code codes.Code, hang bool) *grpcAnswerB
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	// Decode as proto whatever content-subtype arrives, as a real node does
-	// today for subtypes it has not registered.
-	srv := grpc.NewServer(grpc.UnknownServiceHandler(handler), grpc.ForceServerCodecV2(encoding.GetCodecV2(proto.Name)))
+	srv := grpc.NewServer(grpc.UnknownServiceHandler(handler))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { close(stop); srv.Stop() })
 	b.addr = lis.Addr().String()

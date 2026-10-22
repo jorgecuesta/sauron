@@ -18,7 +18,6 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -71,12 +70,13 @@ func (c *rawCodec) Unmarshal(data []byte, v interface{}) error {
 	return fmt.Errorf("invalid type for raw codec: %T", v)
 }
 
+// Name is "proto" because grpc-go puts the codec name on the wire as the
+// content-subtype, and the frames are protobuf bytes passed through unchanged:
+// nodes and clients see a standard application/grpc+proto call. The codec is
+// only installed per connection (ForceCodec / ForceServerCodec), never
+// registered globally, so it cannot replace the real proto codec.
 func (c *rawCodec) Name() string {
-	return "raw"
-}
-
-func init() {
-	encoding.RegisterCodec(&rawCodec{})
+	return "proto"
 }
 
 // GRPCProxy handles gRPC proxying with transparent request forwarding

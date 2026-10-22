@@ -61,7 +61,7 @@ func newGRPCBreakerHarness(t *testing.T, network string, withCB, withCfg bool) *
 		if err != nil {
 			t.Fatalf("backend listen: %v", err)
 		}
-		srv := grpc.NewServer(grpc.UnknownServiceHandler(handler))
+		srv := grpc.NewServer(grpc.UnknownServiceHandler(handler), grpc.ForceServerCodec(&rawCodec{}))
 		go func() { _ = srv.Serve(lis) }()
 		t.Cleanup(srv.Stop)
 		addrs[name] = lis.Addr().String()

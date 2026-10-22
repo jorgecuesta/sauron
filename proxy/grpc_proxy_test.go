@@ -124,7 +124,7 @@ func setupGRPCProxyTestWithOpts(t *testing.T, backendHandler grpc.StreamHandler,
 	if err != nil {
 		t.Fatalf("backend listen: %v", err)
 	}
-	backendSrv := grpc.NewServer(grpc.UnknownServiceHandler(backendHandler))
+	backendSrv := grpc.NewServer(grpc.UnknownServiceHandler(backendHandler), grpc.ForceServerCodec(&rawCodec{}))
 	go func() { _ = backendSrv.Serve(backendLis) }()
 	t.Cleanup(backendSrv.Stop)
 
