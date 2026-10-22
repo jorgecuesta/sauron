@@ -40,6 +40,7 @@ go test -race -count=3 ./...  # Flaky test check
 - stdlib `testing` only — no testify, gomock, or external frameworks
 - Temp YAML files + `zap.NewNop()` + in-memory stores for setup
 - `t.Helper()` for helpers, `t.Parallel()` where safe
+- An address nothing listens on is `127.0.0.1:1` (privileged, never bound). Never bind a port and close it, or close an `httptest.Server`, to get one: a parallel test reuses the port and the "dead" backend answers. For servers a test starts itself, listen on `127.0.0.1:0` and keep the listener
 - Tests exist in: `selector/`, `config/`, `storage/`, `status/`, `proxy/`, `checker/`, `internal/urlutil/`, `adapter/`, `internal/jsonpath/`
 
 ### Test Quality Requirements (NON-NEGOTIABLE)
