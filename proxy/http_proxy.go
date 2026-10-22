@@ -126,8 +126,13 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(cbCfg.RetryBackoff)
 		}
 
-		// Select best node for this attempt.
-		nodeMetrics, nodeName, decision := p.selector.GetBestNode(network, p.endpointType)
+		// Select best node for this attempt. A WebSocket upgrade only goes to
+		// a node whose WebSocket endpoint works.
+		selectNode := p.selector.GetBestNode
+		if IsWebSocketRequest(r) {
+			selectNode = p.selector.GetBestWebSocketNode
+		}
+		nodeMetrics, nodeName, decision := selectNode(network, p.endpointType)
 		if nodeMetrics == nil || nodeName == "" {
 			if attempt == 0 {
 				p.logger.Warn("No available nodes for routing",
@@ -170,7 +175,7 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Internal server error", http.StatusInternalServerError)
 				return
 			}
-			p.handleWebSocket(w, r, target, nodeName, network, start, decision, nodeMetrics)
+			p.handleWebSocket(w, r, target, nodeName, network, start, decision)
 			return
 		}
 
@@ -382,21 +387,11 @@ func (p *HTTPProxy) getCircuitBreakerConfig() *config.CircuitBreakerConfig {
 // handleWebSocket handles WebSocket proxy requests.
 // Delegates the actual proxying to the shared ProxyWebSocket function,
 // then records metrics based on the outcome.
-func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision, nodeMetrics *storage.NodeMetrics) {
+func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision) {
 	p.logger.Debug("Handling WebSocket upgrade",
 		zap.String("node", nodeName),
 		zap.String("network", network),
 	)
-
-	if !nodeMetrics.WebSocketAvailable {
-		p.logger.Warn("Selected node does not support WebSocket",
-			zap.String("node", nodeName),
-			zap.String("network", network),
-		)
-		http.Error(w, "WebSocket not supported by selected backend", http.StatusServiceUnavailable)
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "503", "websocket_not_supported").Inc()
-		return
-	}
 
 	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger)
 	duration := time.Since(start)

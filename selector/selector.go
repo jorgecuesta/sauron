@@ -109,6 +109,19 @@ func (s *Selector) heightCheckProtocol(network string) string {
 // The selector queries heights by the network's height-check protocol,
 // then filters by health for the requested endpoint type.
 func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
+	return s.selectNode(network, endpointType, false)
+}
+
+// GetBestWebSocketNode is GetBestNode restricted to nodes whose WebSocket
+// endpoint works, for WebSocket upgrades. The filter runs before the height
+// comparison, so a WebSocket node a block behind beats a node without
+// WebSocket, and WebSocket-capable externals are considered when no internal
+// node has WebSocket. It keeps its own round-robin counter.
+func (s *Selector) GetBestWebSocketNode(network, endpointType string) (*storage.NodeMetrics, string, *SelectionDecision) {
+	return s.selectNode(network, endpointType, true)
+}
+
+func (s *Selector) selectNode(network, endpointType string, requireWebSocket bool) (*storage.NodeMetrics, string, *SelectionDecision) {
 	requestedProtocol := endpointType
 
 	// Get the height-check protocol for this network.
@@ -153,6 +166,16 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 	// Filter by sync/oracle drift if configured.
 	nodes = s.syncFilter.Filter(network, nodes)
 
+	if requireWebSocket {
+		wsNodes := make([]nodeWithName, 0, len(nodes))
+		for _, n := range nodes {
+			if n.metrics.WebSocketAvailable {
+				wsNodes = append(wsNodes, n)
+			}
+		}
+		nodes = wsNodes
+	}
+
 	// Find max internal height
 	var maxInternalHeight int64
 	for _, node := range nodes {
@@ -173,6 +196,9 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 
 		var maxExternalHeight int64
 		for _, ep := range externalEndpoints {
+			if requireWebSocket && !ep.WebSocketAvailable {
+				continue
+			}
 			if ep.Height > maxExternalHeight {
 				maxExternalHeight = ep.Height
 			}
@@ -191,6 +217,9 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 			)
 
 			for _, ep := range externalEndpoints {
+				if requireWebSocket && !ep.WebSocketAvailable {
+					continue
+				}
 				nodeName := "ext:" + ep.URL
 				nodeMetrics := &storage.NodeMetrics{
 					Height:             ep.Height,
@@ -217,7 +246,11 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 			zap.String("network", network),
 			zap.String("type", endpointType),
 		)
-		metrics.RoutingFailures.WithLabelValues(network, endpointType, "no_nodes").Inc()
+		reason := "no_nodes"
+		if requireWebSocket {
+			reason = "no_websocket_nodes"
+		}
+		metrics.RoutingFailures.WithLabelValues(network, endpointType, reason).Inc()
 		return nil, "", nil
 	}
 
@@ -267,6 +300,9 @@ func (s *Selector) GetBestNode(network, endpointType string) (*storage.NodeMetri
 
 	// Step 3: Round-robin among max-height nodes
 	rrKey := network + ":" + endpointType
+	if requireWebSocket {
+		rrKey += ":ws"
+	}
 	counterPtr, _ := s.rrCounters.LoadOrStore(rrKey, new(uint64))
 	counter := atomic.AddUint64(counterPtr.(*uint64), 1)
 	selectedIndex := int(counter % uint64(len(maxHeightNodes)))
