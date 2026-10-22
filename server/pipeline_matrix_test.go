@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sauron/internal/grpcutil"
 	"strings"
 	"testing"
 	"time"
@@ -18,33 +19,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// rawBytesCodec passes gRPC frames through as []byte, like a client of a
-// service it has no proto types for.
-type rawBytesCodec struct{}
-
-func (rawBytesCodec) Marshal(v any) ([]byte, error) {
-	b, ok := v.(*[]byte)
-	if !ok {
-		return nil, errors.New("rawBytesCodec: want *[]byte")
-	}
-	return *b, nil
-}
-
-func (rawBytesCodec) Unmarshal(data []byte, v any) error {
-	b, ok := v.(*[]byte)
-	if !ok {
-		return errors.New("rawBytesCodec: want *[]byte")
-	}
-	*b = append((*b)[:0], data...)
-	return nil
-}
-
-func (rawBytesCodec) Name() string { return "proto" }
-
 func (p *pipeline) grpcConn(t *testing.T) *grpc.ClientConn {
 	t.Helper()
 	cc, err := grpc.NewClient("passthrough:///"+p.grpcAd, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(rawBytesCodec{})))
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcutil.BytesCodec{})))
 	if err != nil {
 		t.Fatalf("grpc client: %v", err)
 	}

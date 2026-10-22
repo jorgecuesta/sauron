@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sauron/internal/grpcutil"
 	"strconv"
 	"strings"
 	"sync"
@@ -311,19 +312,10 @@ func TestWebSocketClientDisconnectDoesNotBreakServer(t *testing.T) {
 	}
 }
 
-type rawClientCodec struct{}
-
-func (rawClientCodec) Marshal(v any) ([]byte, error) { return v.([]byte), nil }
-func (rawClientCodec) Unmarshal(d []byte, v any) error {
-	*(v.(*[]byte)) = append([]byte(nil), d...)
-	return nil
-}
-func (rawClientCodec) Name() string { return "proto" }
-
 func grpcCall(t *testing.T, e *env) ([]byte, metadata.MD, error) {
 	t.Helper()
 	cc, err := grpc.NewClient(e.grpc, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(rawClientCodec{})))
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcutil.BytesCodec{})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +509,7 @@ func TestRPCAbciInfo(t *testing.T) {
 func TestGRPCMethodBehaviours(t *testing.T) {
 	e := startEnv(t, time.Hour)
 	cc, err := grpc.NewClient(e.grpc, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(rawClientCodec{})))
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(grpcutil.BytesCodec{})))
 	if err != nil {
 		t.Fatal(err)
 	}

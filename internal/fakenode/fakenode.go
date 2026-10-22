@@ -7,9 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
+	"sauron/internal/grpcutil"
 	"strconv"
 	"strings"
 	"sync"
@@ -273,34 +273,10 @@ func (n *Node) state() map[string]any {
 	return map[string]any{"name": n.name, "height": n.Height(), "failed": n.failed.Load(), "frozen": n.frozen.Load()}
 }
 
-// rawCodec passes bytes through untouched so any gRPC method works sans protos.
-type rawCodec struct{}
-
-func (rawCodec) Marshal(v any) ([]byte, error) {
-	switch b := v.(type) {
-	case []byte:
-		return b, nil
-	case *[]byte:
-		return *b, nil
-	}
-	return nil, fmt.Errorf("rawCodec: unsupported type %T", v)
-}
-
-func (rawCodec) Unmarshal(data []byte, v any) error {
-	b, ok := v.(*[]byte)
-	if !ok {
-		return fmt.Errorf("rawCodec: unsupported type %T", v)
-	}
-	*b = append((*b)[:0], data...)
-	return nil
-}
-
-func (rawCodec) Name() string { return "proto" }
-
 // NewGRPCServer returns a server answering every method with a fixed payload.
 func (n *Node) NewGRPCServer() *grpc.Server {
 	return grpc.NewServer(
-		grpc.ForceServerCodec(rawCodec{}),
+		grpc.ForceServerCodec(grpcutil.BytesCodec{}),
 		grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
 			if n.failed.Load() {
 				return status.Error(codes.Unavailable, "node failed")
