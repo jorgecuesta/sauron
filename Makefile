@@ -12,6 +12,8 @@ GOLANGCI_LINT_VERSION ?= v2.14.0
 GOIMPORTS_VERSION ?= v0.51.0
 GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 GOIMPORTS = $(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+# Every Go file in the tree, tracked or not, so local results match CI.
+GO_FILES = $$(find . -name '*.go' -not -path './.git/*' -not -path './.claude/*')
 
 # Default target
 all: fmt lint build
@@ -25,20 +27,20 @@ build:
 fmt:
 	@echo "Formatting code..."
 	gofmt -s -w .
-	$(GOIMPORTS) -w $$(git ls-files '*.go')
+	$(GOIMPORTS) -w $(GO_FILES)
 
 ## fmt-check: Fail if gofmt or goimports would change any file
 fmt-check:
 	@echo "Checking formatting..."
-	@out=$$(gofmt -s -l .); if [ -n "$$out" ]; then echo "gofmt would reformat:"; echo "$$out"; exit 1; fi
-	@out=$$($(GOIMPORTS) -l $$(git ls-files '*.go')); if [ -n "$$out" ]; then echo "goimports would reformat:"; echo "$$out"; exit 1; fi
+	@out=$$(gofmt -s -l .) || exit 1; if [ -n "$$out" ]; then echo "gofmt would reformat:"; echo "$$out"; exit 1; fi
+	@out=$$($(GOIMPORTS) -l $(GO_FILES)) || exit 1; if [ -n "$$out" ]; then echo "goimports would reformat:"; echo "$$out"; exit 1; fi
 
 ## lint: Run golangci-lint (pinned version)
 lint:
 	@echo "Running linters..."
 	$(GOLANGCI_LINT) run --timeout=5m ./...
 
-## test: Run all tests with the race detector
+## test: Run all tests with the race detector (needs cgo: CGO_ENABLED=1 and a C compiler)
 test:
 	@echo "Running tests..."
 	$(GO) test -race -count=1 ./...
