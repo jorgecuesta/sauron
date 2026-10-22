@@ -165,7 +165,7 @@ users:
     grpc: false
 ```
 
-Hot reload: edit config.yaml → `kill -HUP <pid>` or file watcher auto-detects.
+Hot reload: edit config.yaml → `kill -HUP <pid>` or file watcher auto-detects. Restart-only fields (`listen`, `auth`, `rate_limit`, `redis`, network endpoints/listeners) are rejected with `ErrRestartRequired` and the running config is kept; `sauron_config_reload_ok` shows 0 until a good reload.
 
 ## Architecture
 

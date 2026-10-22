@@ -3,17 +3,26 @@
 The list of what to work on next. A finding is recorded only once it is here.
 Mark each claim as **measured**, **verified in code**, or **not verified**.
 
-## 1. gRPC proxy drops response metadata and rewrites backend errors — FIXED LOCALLY, NOT COMMITTED
+## 1. gRPC proxy drops response metadata and rewrites backend errors — FIXED ON BRANCH `fix/grpc-response-metadata`, NOT PUSHED
 
-- **Status (2026-10-21):** fixed in `proxy/grpc_proxy.go`. Tests are in `proxy/grpc_proxy_metadata_test.go`; they failed before the fix and pass after it. All gates green: build, `go test -race ./...`, vet, `make lint`, gofmt.
-  - L3: `make docker-test` 23/23. Its TEST 12 still checked the V1 type name `api`; I fixed it to `rest`. `make docker-test-advanced` 27/27. Neither suite proxies real gRPC, because the docker configs have no gRPC internals.
+- **Status (2026-10-22):** committed on the branch. Every fix has a test that failed before it, except the second-SIGTERM escape, whose test would need a full `Server` in a subprocess. Gates: build, `go test -race ./...` (5 runs), vet, `make lint`, gofmt, `go mod tidy`. L3: `make docker-test` 23/23 and `make docker-test-advanced` 27/27.
   - Local e2e (local sauron → seed-one port-forward), measured: `x-cosmos-block-height` arrives through sauron. The error `NotFound: supplier with operator address: "pokt1doesnotexist": supplier not found` is byte-identical to the direct call.
-  - Pending: the live check on beta after a deploy.
-  - Code-review follow-ups, fixed with failing tests written first:
-    - The handler no longer hangs when the client stops reading and a client-side error occurs.
-    - It no longer deadlocks when the backend ends before the client half-closes.
-    - A relayed backend status no longer produces Error logs.
-  - After those fixes, the L3 re-run was blocked: Tilt from another session holds host ports 3000 and 6379. Re-run both suites when they are free.
+  - Pending: the live check on beta after a deploy (`grpcurl -v` shows the header).
+- **Also fixed on the same branch** (found by code reviews and L3):
+  - **gRPC proxy:**
+    - The call ends on the backend's status even when the client never half-closed; this was a deadlock.
+    - A client-side failure no longer hangs on a send blocked by flow control.
+    - Call outcomes are classified by origin (`backend_status`, `client_error`, `proxy_error`) for logs and the `ProxyErrors` reason, and only `proxy_error` logs at Error.
+    - Proxy-side errors keep a clean gRPC message.
+  - **SIGHUP:**
+    - It used to kill the process (no handler; measured restart count 0→1, then "No height data"). It now reloads the config (measured 0→0).
+    - The file-watcher reload never worked for configs with durations, because of a missing decode hook. Fixed.
+    - Concurrent reloads end on the newest file.
+    - Restart-only changes are rejected with `ErrRestartRequired`. Networks and endpoints are matched by name and protocol, so reordering the YAML is not treated as a restart-only change.
+    - New gauge `sauron_config_reload_ok`.
+    - A second SIGTERM/SIGINT exits immediately during graceful shutdown.
+  - **WebSocket:** a client dropping its connection is `client_disconnect` and no longer counts against the node's circuit breaker.
+  - **Tests:** the L3 suites check V2 endpoint names. The flaky WebSocket happy-path test was fixed: up to 29 of 40 runs failed on `main` under load.
 
 - **Measured (2026-10-21):** seed-one direct over gRPC returns `x-cosmos-block-height`. The same call through `sauron-grpc.{beta.,}infra.pocket.network:443` returns no such header and empty trailers.
 - **Verified in code:** `proxy/grpc_proxy.go` never calls `clientStream.Header()`/`SetHeader` or `clientStream.Trailer()`/`SetTrailer`. Backend errors are returned as `fmt.Errorf("recv from backend: %w")`. grpc-go v1.68 `status.FromError` keeps the code but replaces the message (`status/status.go:112-124`).

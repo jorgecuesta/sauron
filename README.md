@@ -129,7 +129,7 @@ Sauron will automatically route all requests to the best available node.
 - ✅ **Load distribution**: Among nodes at max height, distribute requests evenly using round-robin
 - ✅ **Multi-protocol**: API (HTTP), RPC (HTTP), gRPC support
 - ✅ **External discovery**: Query other Sauron deployments for additional endpoints
-- ✅ **Hot reload**: Update configuration without restart (SIGHUP)
+- ✅ **Hot reload**: Update configuration without restart (SIGHUP or file change). Nodes, externals, users, timeouts and height-check intervals reload live. Changes to `listen`, `auth`, `rate_limit`, `redis` or a network's endpoints/listeners are rejected until a restart (`sauron_config_reload_ok` drops to 0)
 - ✅ **Authentication**: Token-based access control
 - ✅ **Observability**: Full Prometheus metrics
 - ✅ **Docker support**: Production-ready containerization
