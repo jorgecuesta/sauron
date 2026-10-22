@@ -102,9 +102,15 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Buffer request body for potential retry.
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize))
+	// Read one byte past the limit so an oversized body is rejected, never
+	// forwarded truncated.
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	if int64(len(bodyBytes)) > maxRequestBodySize {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 

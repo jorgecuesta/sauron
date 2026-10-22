@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -90,3 +91,42 @@ func TestHTTPProxy_ClientCancelIsNotABackendFailure(t *testing.T) {
 
 // TestHTTPProxy_OversizedBodyRejected (#16): a body over the limit must be
 // rejected with 413 and never forwarded truncated.
+func TestHTTPProxy_OversizedBodyRejected(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, _ := newCBHTTPProxy(t, "body-net", backend.URL)
+
+	tests := []struct {
+		name     string
+		size     int64
+		wantCode int
+		wantHits int32
+	}{
+		{name: "exactly at the limit", size: maxRequestBodySize, wantCode: http.StatusOK, wantHits: 1},
+		{name: "one byte over the limit", size: maxRequestBodySize + 1, wantCode: http.StatusRequestEntityTooLarge, wantHits: 0},
+	}
+	for _, tc := range tests {
+		hits.Store(0)
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(make([]byte, tc.size)))
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		if rr.Code != tc.wantCode {
+			t.Errorf("%s: status = %d, want %d", tc.name, rr.Code, tc.wantCode)
+		}
+		if got := hits.Load(); got != tc.wantHits {
+			t.Errorf("%s: backend hits = %d, want %d", tc.name, got, tc.wantHits)
+		}
+	}
+}
+
+// TestProxyWebSocket_NonSwitchingResponseIsBackendError (#14): a backend that
+// answers the upgrade with anything but 101 refused the WebSocket. The client
+// gets that response, and the call is reported as a backend error, not a
+// success that starts a copy loop.
