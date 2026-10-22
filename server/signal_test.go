@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -151,5 +152,30 @@ func TestServer_SignalLoopReturnsOnFatalError(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("signal loop did not return on a fatal background error")
+	}
+}
+
+// TestServer_SIGHUPDuringStartupDoesNotKill: between New and WaitForShutdown
+// (config load, Redis ping, listener start) a SIGHUP must not take Go's
+// default action and kill the process. It runs New in a child process that
+// sends itself SIGHUP; the child must exit normally.
+func TestServer_SIGHUPDuringStartupDoesNotKill(t *testing.T) {
+	if os.Getenv("SAURON_SIGHUP_CHILD") == "1" {
+		path := writeSignalTestConfig(t, "5s")
+		if _, err := New(path); err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+			t.Fatalf("kill: %v", err)
+		}
+		time.Sleep(300 * time.Millisecond) // give a default-action SIGHUP time to kill us
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestServer_SIGHUPDuringStartupDoesNotKill$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "SAURON_SIGHUP_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child process did not survive a SIGHUP after New: %v\n%s", err, out)
 	}
 }
