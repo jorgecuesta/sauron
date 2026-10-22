@@ -701,3 +701,209 @@ func TestGRPCProxy_ProxyErrorsReasonByOrigin(t *testing.T) {
 		t.Errorf("ProxyErrors{reason=proxy_error} delta = %v, want 0", got)
 	}
 }
+
+// TestTrackableBackendFailure: only failures that say something about the
+// backend may count against an external endpoint's health. A client going
+// away surfaces as Canceled, Unavailable or Internal too, and must not.
+func TestTrackableBackendFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		origin string
+		code   codes.Code
+		want   bool
+	}{
+		{originBackend, codes.Unavailable, true},
+		{originBackend, codes.Internal, true},
+		{originBackend, codes.Unknown, true},
+		{originBackend, codes.DataLoss, true},
+		{originBackend, codes.NotFound, false},
+		{originBackend, codes.OK, false},
+		{originProxy, codes.Unavailable, true},
+		{originProxy, codes.ResourceExhausted, false},
+		{originClient, codes.Unavailable, false},
+		{originClient, codes.Internal, false},
+		{originClient, codes.Canceled, false},
+		{originClient, codes.Unknown, false},
+	}
+	for _, tc := range tests {
+		if got := trackableBackendFailure(tc.origin, tc.code); got != tc.want {
+			t.Errorf("trackableBackendFailure(%s, %s) = %v, want %v", tc.origin, tc.code, got, tc.want)
+		}
+	}
+}
+
+// TestGRPCProxy_ClientConnDropIsClientOrigin: a client whose connection dies
+// mid-stream must end as client_error whatever code the transport reports, so
+// it never reaches external-endpoint health tracking. Not parallel: it reads
+// global counters.
+func TestGRPCProxy_ClientConnDropIsClientOrigin(t *testing.T) {
+	handler := func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			return err
+		}
+		for {
+			if err := stream.SendMsg(&rawFrame{payload: []byte("tick")}); err != nil {
+				return err
+			}
+			select {
+			case <-stream.Context().Done():
+				return stream.Context().Err()
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+	h := setupGRPCProxyTest(t, handler)
+
+	const service = "drop.Service"
+	backendBefore := 0.0
+	for _, c := range []codes.Code{codes.Canceled, codes.Unavailable, codes.Internal, codes.Unknown} {
+		backendBefore += proxyErrCount(c, originBackend) + proxyErrCount(c, originProxy)
+	}
+
+	for i := 0; i < 5; i++ {
+		// A dedicated client connection, closed under the live stream.
+		conn := dialInsecure(t, h.addr)
+		stream, err := conn.NewStream(context.Background(),
+			&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
+			"/"+service+"/Ticks",
+			grpc.ForceCodec(&rawCodec{}),
+		)
+		if err != nil {
+			t.Fatalf("NewStream: %v", err)
+		}
+		if err := stream.SendMsg(&rawFrame{payload: []byte("go")}); err != nil {
+			t.Fatalf("SendMsg: %v", err)
+		}
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			t.Fatalf("RecvMsg: %v", err)
+		}
+		_ = conn.Close()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var m dto.Metric
+		_ = metrics.NodeRequests.WithLabelValues("testnet", "node-1", "grpc", service).Write(&m)
+		if m.GetCounter().GetValue() >= 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %v of 5 calls finished", m.GetCounter().GetValue())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	backendAfter := 0.0
+	for _, c := range []codes.Code{codes.Canceled, codes.Unavailable, codes.Internal, codes.Unknown} {
+		backendAfter += proxyErrCount(c, originBackend) + proxyErrCount(c, originProxy)
+	}
+	if d := backendAfter - backendBefore; d != 0 {
+		t.Errorf("%v client connection drops were attributed to the backend or the proxy, want 0", d)
+	}
+}
+
+// TestGRPCProxy_ProxyRecvLimitIsProxyOrigin: a request rejected by the
+// proxy's own grpc_max_recv_msg_size is a proxy configuration limit, not a
+// client fault, and must surface as proxy_error. Not parallel: global counters.
+func TestGRPCProxy_ProxyRecvLimitIsProxyOrigin(t *testing.T) {
+	handler := func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		return stream.RecvMsg(&f)
+	}
+	h := setupGRPCProxyTestWithOpts(t, handler, grpcProxyTestOpts{maxRecv: 1024})
+
+	before := proxyErrCount(codes.ResourceExhausted, originProxy)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := h.conn.NewStream(ctx,
+		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
+		"/limit.Service/Big",
+	)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := stream.SendMsg(&rawFrame{payload: make([]byte, 4096)}); err != nil {
+		t.Fatalf("SendMsg: %v", err)
+	}
+	_ = stream.CloseSend()
+	var f rawFrame
+	if err := stream.RecvMsg(&f); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("err = %v, want ResourceExhausted", err)
+	}
+	if !waitHandlerFinished("limit.Service", 3*time.Second) {
+		t.Fatal("proxy handler did not finish")
+	}
+	if d := proxyErrCount(codes.ResourceExhausted, originProxy) - before; d != 1 {
+		t.Errorf("ProxyErrors{8, proxy_error} delta = %v, want 1", d)
+	}
+}
+
+// TestGRPCProxy_JoinsS2CWhenClientGone: when the client's stream is already
+// over, the handler must wait for its server->client goroutine before
+// returning, so nothing touches the server stream after the handler returns.
+// The goroutine's exit log must therefore come before the call's end log.
+// Which side notices a client cancel first is a race, so it is repeated.
+func TestGRPCProxy_JoinsS2CWhenClientGone(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	handler := func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			return err
+		}
+		for {
+			if err := stream.SendMsg(&rawFrame{payload: make([]byte, 512)}); err != nil {
+				return err
+			}
+		}
+	}
+	h := setupGRPCProxyTestWithOpts(t, handler, grpcProxyTestOpts{logger: zap.New(core)})
+
+	const calls = 20
+	for i := 0; i < calls; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		stream, err := h.conn.NewStream(ctx,
+			&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
+			"/join.Service/Flood",
+		)
+		if err != nil {
+			t.Fatalf("NewStream: %v", err)
+		}
+		if err := stream.SendMsg(&rawFrame{payload: []byte("go")}); err != nil {
+			t.Fatalf("SendMsg: %v", err)
+		}
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			t.Fatalf("RecvMsg: %v", err)
+		}
+		cancel()
+
+		// Wait for this call's end log.
+		deadline := time.Now().Add(3 * time.Second)
+		for logs.FilterMessage("gRPC call ended with status").Len() < i+1 {
+			if time.Now().After(deadline) {
+				t.Fatalf("call %d never ended", i)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Per call, in order: the s2c exit must be logged before the end log.
+	exits, ends := 0, 0
+	for _, e := range logs.All() {
+		switch e.Message {
+		case "Exiting server->client forwarding goroutine":
+			exits++
+		case "gRPC call ended with status":
+			ends++
+			if exits < ends {
+				t.Errorf("call %d ended before its server->client goroutine exited", ends)
+			}
+		}
+	}
+}

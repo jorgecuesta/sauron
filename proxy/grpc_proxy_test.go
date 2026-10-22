@@ -84,6 +84,7 @@ func TestNormalizeGRPCMethod(t *testing.T) {
 
 // grpcProxyHarness holds all components wired for a proxy pipeline test.
 type grpcProxyHarness struct {
+	addr        string // proxy listen address, for tests that need their own client conn
 	conn        *grpc.ClientConn
 	proxySrv    *grpc.Server
 	healthStore *storage.HealthStore
@@ -106,6 +107,7 @@ func setupGRPCProxyTest(t *testing.T, backendHandler grpc.StreamHandler) *grpcPr
 // grpcProxyTestOpts tweaks setupGRPCProxyTestWithOpts; zero values keep defaults.
 type grpcProxyTestOpts struct {
 	maxSend int         // grpc_max_send_msg_size; also caps what the proxy sends to the backend
+	maxRecv int         // grpc_max_recv_msg_size; also caps what the proxy accepts from the backend
 	logger  *zap.Logger // proxy logger; nil means zap.NewNop()
 }
 
@@ -149,6 +151,7 @@ networks:
       - protocol: grpc
         listen: ":18082"
         grpc_max_send_msg_size: ` + strconv.Itoa(opts.maxSend) + `
+        grpc_max_recv_msg_size: ` + strconv.Itoa(opts.maxRecv) + `
 
 internals:
   - name: node-1
@@ -196,6 +199,7 @@ internals:
 	t.Cleanup(func() { _ = conn.Close() })
 
 	return &grpcProxyHarness{
+		addr:        proxyLis.Addr().String(),
 		conn:        conn,
 		proxySrv:    proxySrv,
 		healthStore: healthStore,

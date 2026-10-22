@@ -31,6 +31,20 @@ const (
 	originProxy   = "proxy_error"    // a failure of the proxy itself
 )
 
+// trackableBackendFailure reports whether a call's end may count against the
+// endpoint's health: a 5xx-equivalent code (Internal, Unavailable, DataLoss,
+// Unknown) that did not come from the client going away.
+func trackableBackendFailure(origin string, code codes.Code) bool {
+	if origin == originClient {
+		return false
+	}
+	switch code {
+	case codes.Internal, codes.Unavailable, codes.DataLoss, codes.Unknown:
+		return true
+	}
+	return false
+}
+
 // callEnd is how one forwarding direction ended; err is nil on a clean end.
 type callEnd struct {
 	err    error
@@ -314,6 +328,14 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 					c2sEnd <- callEnd{}
 					return
 				}
+				if status.Code(err) == codes.ResourceExhausted {
+					// Rejected by this proxy's own grpc_max_recv_msg_size (grpc-go
+					// also cancels the stream then): a configuration limit operators
+					// must see, not a client fault.
+					p.logger.Error("Request exceeds the proxy's receive limit", zap.Error(err))
+					c2sEnd <- callEnd{err: err, origin: originProxy}
+					return
+				}
 				p.logger.Debug("Client stream ended", zap.Error(err))
 				c2sEnd <- callEnd{err: err, origin: originClient}
 				return
@@ -339,7 +361,9 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	}()
 
 	// Forward server -> client
+	s2cDone := make(chan struct{})
 	go func() {
+		defer close(s2cDone)
 		p.logger.Debug("Started server->client forwarding goroutine")
 		defer p.logger.Debug("Exiting server->client forwarding goroutine")
 
@@ -380,6 +404,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 
 	// Wait for completion
 	var end callEnd
+	clientSideFailed := false
 	select {
 	case end = <-s2cEnd:
 		// The backend finished (or the client went away): the call is over.
@@ -387,12 +412,19 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		if end.err == nil {
 			// Client half-closed, or the backend ended mid-send: its status follows.
 			end = <-s2cEnd
+		} else {
+			clientSideFailed = true
 		}
-		// Otherwise the server->client goroutine is not awaited: it may be
-		// blocked sending to a client that stopped reading, and only returning
-		// (which ends the server stream) unblocks it.
 	}
 	cancel()
+	// Wait for the server->client goroutine so it never touches the server
+	// stream after this handler returns. The one exception: the client side
+	// failed while the client's stream is still open (a client that stopped
+	// reading); the goroutine may then be blocked in SendMsg on flow control,
+	// and only returning (which ends the server stream) unblocks it.
+	if !clientSideFailed || stream.Context().Err() != nil {
+		<-s2cDone
+	}
 	// Returned as-is: every error here is already a gRPC status (or becomes
 	// Unknown), and wrapping it would rewrite the message the client sees.
 	proxyErr := end.err
@@ -428,10 +460,8 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 			)
 		}
 
-		// Track 5xx-equivalent gRPC errors for external endpoints
-		// gRPC codes that map to 5xx: Internal(13), Unavailable(14), DataLoss(15), Unknown(2)
-		if grpcStatus == codes.Internal || grpcStatus == codes.Unavailable ||
-			grpcStatus == codes.DataLoss || grpcStatus == codes.Unknown {
+		// Track 5xx-equivalent gRPC errors for external endpoints.
+		if trackableBackendFailure(end.origin, grpcStatus) {
 			if p.endpointStore != nil {
 				if p.endpointStore.TrackProxyError(p.network, "grpc", targetAddr) {
 					p.logger.Debug("Tracked gRPC 5xx-equivalent error for external endpoint",
