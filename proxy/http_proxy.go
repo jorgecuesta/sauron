@@ -376,12 +376,7 @@ func isRetriableHTTPCode(code int, retriableCodes []int) bool {
 // getCircuitBreakerConfig returns the CircuitBreakerConfig for this proxy's network.
 // Returns nil when unconfigured.
 func (p *HTTPProxy) getCircuitBreakerConfig() *config.CircuitBreakerConfig {
-	cfg := p.configLoader.Get()
-	net := cfg.FindNetwork(p.network)
-	if net == nil {
-		return nil
-	}
-	return net.CircuitBreaker
+	return networkCircuitBreakerConfig(p.configLoader, p.network)
 }
 
 // handleWebSocket handles WebSocket proxy requests.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"sauron/config"
 	"sauron/storage"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -79,6 +80,16 @@ func (cb *CircuitBreaker) GetErrorCount(network, node, protocol string) int {
 		return int(counter.Load())
 	}
 	return 0
+}
+
+// networkCircuitBreakerConfig returns network's circuit breaker config from
+// the current config, or nil when the network has none.
+func networkCircuitBreakerConfig(loader *config.MultiChainLoader, network string) *config.CircuitBreakerConfig {
+	net := loader.Get().FindNetwork(network)
+	if net == nil {
+		return nil
+	}
+	return net.CircuitBreaker
 }
 
 func cbKey(network, node, protocol string) string {

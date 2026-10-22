@@ -314,6 +314,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 			zap.Error(err),
 		)
 		metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", "unavailable", "stream_error").Inc()
+		p.recordBreakerError(nodeName)
 		// The backend cannot be reached: that is Unavailable (clients retry on
 		// it), not Internal, and it counts against the endpoint like any other
 		// backend failure. Dial details stay in the log.
@@ -482,6 +483,7 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 
 		// Track 5xx-equivalent gRPC errors for external endpoints.
 		if trackableBackendFailure(end.origin, grpcStatus) {
+			p.recordBreakerError(nodeName)
 			if p.endpointStore != nil {
 				if p.endpointStore.TrackProxyError(p.network, "grpc", targetAddr) {
 					p.logger.Debug("Tracked gRPC 5xx-equivalent error for external endpoint",
@@ -492,7 +494,12 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 				}
 			}
 		}
+		if end.origin != originClient && !trackableBackendFailure(end.origin, grpcStatus) {
+			// The node answered (e.g. NotFound for a bad query): it is alive.
+			p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
+		}
 	} else {
+		p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
 		p.logger.Debug("gRPC request completed",
 			zap.String("method", method),
 			zap.Duration("duration", duration),
@@ -511,6 +518,17 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 }
 
 // shouldUseInsecureForNode determines if we should use insecure connection for a specific node
+// recordBreakerError counts a backend failure of nodeName against the
+// circuit breaker, when the proxy has one and the network configures it.
+func (p *GRPCProxy) recordBreakerError(nodeName string) {
+	if p.circuitBreaker == nil {
+		return
+	}
+	if cbCfg := networkCircuitBreakerConfig(p.configLoader, p.network); cbCfg != nil {
+		p.circuitBreaker.RecordError(p.network, nodeName, "grpc", cbCfg.Threshold)
+	}
+}
+
 func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
 	cfg := p.configLoader.Get()
 	// Check internal nodes

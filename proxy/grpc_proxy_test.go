@@ -515,17 +515,15 @@ internals:
 }
 
 // ---------------------------------------------------------------------------
-// TestGRPCProxy_CircuitBreakerTrips — CB marks node unhealthy
+// TestCircuitBreaker_TripExcludesNodeFromSelector — CB marks node unhealthy
 // ---------------------------------------------------------------------------
 
-// TestGRPCProxy_CircuitBreakerTrips verifies that the CircuitBreaker marks a
-// node unhealthy after the configured threshold of consecutive errors.
-//
-// Note: The GRPCProxy stores the circuit breaker but does not call RecordError
-// automatically in proxyHandler. This test validates the CB logic itself and
-// the integration of HealthStore with the selector — it exercises the full
-// "CB trips → node excluded" pipeline.
-func TestGRPCProxy_CircuitBreakerTrips(t *testing.T) {
+// TestCircuitBreaker_TripExcludesNodeFromSelector verifies that the
+// CircuitBreaker marks a node unhealthy after the configured threshold of
+// consecutive errors and that the selector then excludes it. It calls the
+// breaker directly; that GRPCProxy feeds it from real calls is tested in
+// grpc_breaker_test.go.
+func TestCircuitBreaker_TripExcludesNodeFromSelector(t *testing.T) {
 	t.Parallel()
 
 	hs := storage.NewHealthStore()
