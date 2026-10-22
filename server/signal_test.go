@@ -179,3 +179,43 @@ func TestServer_SIGHUPDuringStartupDoesNotKill(t *testing.T) {
 		t.Fatalf("child process did not survive a SIGHUP after New: %v\n%s", err, out)
 	}
 }
+
+// TestServer_SIGHUPAfterShutdownStartsDoesNotKill: once WaitForShutdown has
+// begun the graceful shutdown, SIGHUP must stay caught (only SIGTERM/SIGINT
+// get their default action back), so it cannot kill a draining process. The
+// child runs New, triggers shutdown with SIGTERM, then sends itself SIGHUP.
+func TestServer_SIGHUPAfterShutdownStartsDoesNotKill(t *testing.T) {
+	if os.Getenv("SAURON_SIGHUP_SHUTDOWN_CHILD") == "1" {
+		path := writeSignalTestConfig(t, "5s")
+		srv, err := New(path)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		done := make(chan struct{})
+		go func() {
+			srv.WaitForShutdown()
+			close(done)
+		}()
+		time.Sleep(100 * time.Millisecond) // let WaitForShutdown register SIGTERM
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatalf("kill TERM: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("shutdown did not finish")
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+			t.Fatalf("kill HUP: %v", err)
+		}
+		time.Sleep(300 * time.Millisecond) // give a default-action SIGHUP time to kill us
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestServer_SIGHUPAfterShutdownStartsDoesNotKill$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "SAURON_SIGHUP_SHUTDOWN_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child process did not survive a SIGHUP after shutdown began: %v\n%s", err, out)
+	}
+}
