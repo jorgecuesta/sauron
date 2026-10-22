@@ -251,6 +251,11 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 			}
 
 			hcNodeURL := node.Endpoints[hc.Protocol]
+			if hcNodeURL == "" && hc.IsWebSocket {
+				// CometBFT serves WebSocket on the RPC port (/websocket), so a node
+				// without an explicit websocket endpoint is checked through its RPC URL.
+				hcNodeURL = node.Endpoints["rpc"]
+			}
 			if hcNodeURL == "" {
 				continue
 			}
@@ -258,7 +263,7 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 			if hc.IsGRPC {
 				s.scheduleGRPCHealthCheck(node, hcNodeURL, hc.Protocol)
 			} else if hc.IsWebSocket {
-				s.scheduleWebSocketHealthCheck(node, hcNodeURL, hc.Protocol)
+				s.scheduleWebSocketHealthCheck(node, hcNodeURL, hc.Protocol, checkCfg.Protocol)
 			} else {
 				s.scheduleHTTPHealthCheck(node, hcNodeURL, hc)
 			}
@@ -347,7 +352,11 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 
 // scheduleWebSocketHealthCheck verifies that a WebSocket endpoint is reachable
 // using the existing CheckWebSocket function.
-func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL string, protocol string) {
+//
+// The result is also recorded as WebSocketAvailable on the node's height-store
+// entry under heightProtocol: that entry is what the selector returns and what
+// the HTTP proxy checks before allowing a WebSocket upgrade.
+func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL, protocol, heightProtocol string) {
 	_ = s.pool.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
@@ -361,10 +370,13 @@ func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChai
 		}
 
 		ok := CheckWebSocket(ctx, checkURL, s.logger)
+		s.heightStore.UpdateWebSocketAvailability(node.Network, node.Name, heightProtocol, ok)
 		if ok {
 			s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+			metrics.NodeWebSocketAvailable.WithLabelValues(node.Network, node.Name, protocol).Set(1)
 		} else {
 			s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, "websocket check failed")
+			metrics.NodeWebSocketAvailable.WithLabelValues(node.Network, node.Name, protocol).Set(0)
 		}
 	})
 }

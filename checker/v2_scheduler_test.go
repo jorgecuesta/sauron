@@ -451,6 +451,7 @@ internals:
 
 	sched := &MultiChainScheduler{
 		pool:         pool,
+		heightStore:  storage.NewHeightStore(),
 		healthStore:  healthStore,
 		configLoader: loader,
 		logger:       zap.NewNop(),
@@ -558,7 +559,7 @@ func TestScheduleWebSocketHealthCheck_Unhealthy(t *testing.T) {
 		Endpoints: map[string]string{"rpc": srv.URL},
 	}
 
-	sched.scheduleWebSocketHealthCheck(node, srv.URL, "websocket")
+	sched.scheduleWebSocketHealthCheck(node, srv.URL, "websocket", "rpc")
 	drainTestPool(sched.pool)
 
 	if healthStore.IsHealthy("testnet", "test-node", "websocket") {
