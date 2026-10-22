@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -357,5 +358,43 @@ func TestProxyWebSocket_RejectionBodyWithoutLengthDoesNotHang(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ProxyWebSocket still blocked 5s after a refused upgrade with an open-ended body")
+	}
+}
+
+// A percent-encoded slash (%2F) in the request path or in the node URL's path
+// reaches the node still encoded: decoding it changes which route matches.
+// The join follows httputil.NewSingleHostReverseProxy (joinURLPath).
+func TestHTTPProxy_EncodedSlashReachesNodeEncoded(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, targetPath, reqPath, want string
+	}{
+		{name: "plain path", targetPath: "", reqPath: "/a/b", want: "/a/b"},
+		{name: "encoded request, no target path", targetPath: "", reqPath: "/a%2Fb", want: "/a%2Fb"},
+		{name: "encoded request under a target path", targetPath: "/base", reqPath: "/a%2Fb", want: "/base/a%2Fb"},
+		{name: "encoded target path", targetPath: "/base%2Fx", reqPath: "/a", want: "/base%2Fx/a"},
+		{name: "both encoded", targetPath: "/base%2Fx", reqPath: "/a%2Fb", want: "/base%2Fx/a%2Fb"},
+		{name: "query kept", targetPath: "", reqPath: "/a%2Fb?height=5", want: "/a%2Fb?height=5"},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := make(chan string, 1)
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got <- r.RequestURI
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+
+			p, _, _ := newCBHTTPProxy(t, "encoded-net-"+strconv.Itoa(i), backend.URL+tt.targetPath)
+			rr := httptest.NewRecorder()
+			p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tt.reqPath, nil))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status %d", rr.Code)
+			}
+			if uri := <-got; uri != tt.want {
+				t.Errorf("node received %q, want %q", uri, tt.want)
+			}
+		})
 	}
 }

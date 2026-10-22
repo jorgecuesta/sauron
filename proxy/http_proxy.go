@@ -37,6 +37,24 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
+// joinURLPath joins a and b's paths keeping their escaping (e.g. an encoded
+// slash, %2F), as httputil.NewSingleHostReverseProxy does: RawPath is joined
+// from the escaped forms whenever either side has one.
+func joinURLPath(a, b *url.URL) (path, rawpath string) {
+	if a.RawPath == "" && b.RawPath == "" {
+		return singleJoiningSlash(a.Path, b.Path), ""
+	}
+	apath, bpath := a.EscapedPath(), b.EscapedPath()
+	aslash, bslash := strings.HasSuffix(apath, "/"), strings.HasPrefix(bpath, "/")
+	switch {
+	case aslash && bslash:
+		return a.Path + b.Path[1:], apath + bpath[1:]
+	case !aslash && !bslash:
+		return a.Path + "/" + b.Path, apath + "/" + bpath
+	}
+	return a.Path + b.Path, apath + bpath
+}
+
 // HTTPProxy handles HTTP/API and RPC proxying with retry and circuit-breaking support.
 // The gates through which the Ringwraiths pass
 type HTTPProxy struct {
@@ -254,10 +272,7 @@ func (p *HTTPProxy) forwardRequest(
 
 	// Build outgoing URL — replicate full httputil.NewSingleHostReverseProxy Director behavior.
 	outURL := *target
-	outURL.Path = singleJoiningSlash(target.Path, r.URL.Path)
-	if target.Path != "" && r.URL.RawPath != "" {
-		outURL.RawPath = singleJoiningSlash(target.RawPath, r.URL.RawPath)
-	}
+	outURL.Path, outURL.RawPath = joinURLPath(target, r.URL)
 	if target.RawQuery == "" || r.URL.RawQuery == "" {
 		outURL.RawQuery = target.RawQuery + r.URL.RawQuery
 	} else {
