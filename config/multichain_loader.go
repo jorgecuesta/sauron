@@ -155,14 +155,14 @@ func (l *MultiChainLoader) reload() error {
 //     message sizes (listeners and servers built in server.New);
 //   - whether a network has archival (ArchivalFilter, archival cron) and its
 //     whole sync block (SyncFilter max drift, OracleChecker configs);
-//   - mode and height_check (except interval, unused), frozen into default
-//     oracle checks;
+//   - mode and height_check (except interval, which the scheduler reads
+//     every tick), frozen into default oracle checks;
 //   - an internal node's grpc_insecure while its gRPC URL is unchanged (the
 //     pooled connection is keyed by URL).
 //
-// Live: timeouts.health_check, endpoint advertise URLs, archival.min_height,
-// circuit_breaker, internals (nodes, URLs), externals, users and
-// external_failover_threshold.
+// Live: timeouts.health_check, endpoint advertise URLs, archival.min_height
+// and check_interval, height_check.interval, circuit_breaker, internals (nodes,
+// URLs), externals, users and external_failover_threshold.
 func keepStartupOnly(old, new *MultiChainConfig) (*MultiChainConfig, []string) {
 	eff := *new
 	var kept []string

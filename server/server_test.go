@@ -247,11 +247,12 @@ func TestBuildOracleConfig_CheckIntervalMatchesNetwork(t *testing.T) {
 	tests := []struct {
 		name     string
 		interval time.Duration
+		want     time.Duration
 	}{
-		{"zero interval", 0},
-		{"short interval", 5 * time.Second},
-		{"standard interval", 30 * time.Second},
-		{"long interval", 5 * time.Minute},
+		{"unset interval uses the default", 0, config.DefaultCheckInterval},
+		{"short interval", 5 * time.Second, 5 * time.Second},
+		{"standard interval", 30 * time.Second, 30 * time.Second},
+		{"long interval", 5 * time.Minute, 5 * time.Minute},
 	}
 
 	reg := newRegistryWithCosmos(t)
@@ -268,8 +269,8 @@ func TestBuildOracleConfig_CheckIntervalMatchesNetwork(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got.Interval != tt.interval {
-				t.Errorf("Interval = %v, want %v", got.Interval, tt.interval)
+			if got.Interval != tt.want {
+				t.Errorf("Interval = %v, want %v", got.Interval, tt.want)
 			}
 		})
 	}

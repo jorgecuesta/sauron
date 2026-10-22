@@ -206,7 +206,8 @@ Client → Proxy (HTTP/gRPC) → Selector → Best Node
 
 ### Health Check Cycle (cron-based via `robfig/cron`)
 
-- Every 30s: check all internal nodes (API path, RPC /status, gRPC: transport READY, then a real `GetLatestBlock` query; a node-failure status keeps the node out)
+- Every `height_check.interval` per network (default 30s, read each 1s tick): check its internal nodes (API path, RPC /status, gRPC: transport READY, then a real `GetLatestBlock` query; a node-failure status keeps the node out)
+- Every `archival.check_interval` / `sync.check_interval` per network (default 30s): archival status and sync oracles
 - Every 10s: query external Sauron rings for endpoint discovery
 - Every 10s: recover failed external endpoints
 

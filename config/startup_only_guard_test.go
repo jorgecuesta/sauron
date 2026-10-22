@@ -38,7 +38,7 @@ var configFieldClass = map[string]string{
 	"networks[].type":                               "startup",
 	"networks[].mode":                               "startup",
 	"networks[].height_check.protocol":              "startup",
-	"networks[].height_check.interval":              "live", // unused: the height cron is fixed at 30s
+	"networks[].height_check.interval":              "live", // read every scheduler tick
 	"networks[].height_check.method":                "startup",
 	"networks[].height_check.url_path":              "startup",
 	"networks[].height_check.headers":               "startup",
@@ -51,7 +51,7 @@ var configFieldClass = map[string]string{
 	"networks[].endpoints[].grpc_max_recv_msg_size": "startup",
 	"networks[].endpoints[].grpc_max_send_msg_size": "startup",
 	"networks[].archival.min_height":                "live",
-	"networks[].archival.check_interval":            "live", // unused: the archival cron is fixed at 30s
+	"networks[].archival.check_interval":            "live", // read every scheduler tick
 	"networks[].sync.max_drift":                     "startup",
 	"networks[].sync.check_interval":                "startup",
 	"networks[].sync.oracles[].url":                 "startup",

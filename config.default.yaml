@@ -43,7 +43,7 @@ networks:
     type: cosmos
     height_check:
       protocol: rpc
-      interval: 30s
+      interval: 30s   # how often this network's nodes are checked (default 30s, minimum 1s)
     endpoints:
       - protocol: rest
         listen: ":8080"

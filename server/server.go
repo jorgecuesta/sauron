@@ -204,7 +204,7 @@ func New(configPath string) (*Server, error) {
 func buildOracleConfig(network *config.MultiChainNetwork, registry *adapter.Registry) (checker.OracleConfig, error) {
 	oracleCfg := checker.OracleConfig{
 		Network:  network.Name,
-		Interval: network.Sync.CheckInterval,
+		Interval: network.Sync.Interval(),
 	}
 
 	adpt, err := registry.Get(network.Type)

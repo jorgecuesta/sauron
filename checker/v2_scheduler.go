@@ -15,6 +15,7 @@ import (
 	"sauron/storage"
 
 	"github.com/alitto/pond/v2"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -41,7 +42,12 @@ type MultiChainScheduler struct {
 	archivalStore *storage.ArchivalStore
 	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
-	timeout       atomic.Int64 // health-check timeout (ns); written by every cron job, so atomic
+	timeout       atomic.Int64                  // health-check timeout (ns); written by every cron job, so atomic
+	lastRun       *xsync.Map[string, time.Time] // when each periodic check last ran, by "kind:network"
+}
+
+func newLastRunMap() *xsync.Map[string, time.Time] {
+	return xsync.NewMap[string, time.Time]()
 }
 
 // NewMultiChainScheduler creates a scheduler with adapter-driven checks.
@@ -77,6 +83,7 @@ func NewMultiChainScheduler(
 		archivalStore: archivalStore,
 		configLoader:  configLoader,
 		logger:        logger,
+		lastRun:       newLastRunMap(),
 	}
 	s.timeout.Store(int64(5 * time.Second))
 	return s
@@ -87,18 +94,19 @@ func (s *MultiChainScheduler) checkTimeout() time.Duration {
 	return time.Duration(s.timeout.Load())
 }
 
-// Start begins scheduled checks. Each network gets its own height check
-// interval based on config; health checks and externals use fixed intervals.
+// Start begins scheduled checks. A one-second tick runs each network's
+// internal node, archival and oracle checks when their configured interval has
+// elapsed (read from the current config, so a reload applies at once); the
+// external ring checks and their recovery use fixed intervals.
 func (s *MultiChainScheduler) Start() error {
 	cfg := s.configLoader.Get()
 	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
 
-	// Schedule internal node checks every 30 seconds.
-	_, err := s.cron.AddFunc("*/30 * * * * *", func() {
-		s.checkInternalNodes()
+	_, err := s.cron.AddFunc("* * * * * *", func() {
+		s.tick(time.Now())
 	})
 	if err != nil {
-		return fmt.Errorf("multi-chain scheduler: failed to add internal check cron: %w", err)
+		return fmt.Errorf("multi-chain scheduler: failed to add check tick: %w", err)
 	}
 
 	// Schedule external ring checks every 10 seconds.
@@ -117,29 +125,12 @@ func (s *MultiChainScheduler) Start() error {
 		return fmt.Errorf("multi-chain scheduler: failed to add recovery cron: %w", err)
 	}
 
-	// Schedule oracle checks every 30 seconds if oracles are configured.
 	if s.oracleChecker != nil && len(s.oracleChecker.Networks()) > 0 {
-		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
-			defer cancel()
-			s.oracleChecker.CheckAll(ctx, s.checkTimeout())
-		})
-		if err != nil {
-			return fmt.Errorf("multi-chain scheduler: failed to add oracle check cron: %w", err)
-		}
 		s.logger.Info("Oracle checker scheduled",
 			zap.Strings("networks", s.oracleChecker.Networks()),
 		)
 	}
-
-	// Schedule archival checks every 30 seconds for networks with archival config.
 	if s.archivalStore != nil && s.hasArchivalNetworks() {
-		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
-			s.checkArchivalStatus()
-		})
-		if err != nil {
-			return fmt.Errorf("multi-chain scheduler: failed to add archival check cron: %w", err)
-		}
 		s.logger.Info("Archival checker scheduled")
 	}
 
@@ -160,14 +151,64 @@ func (s *MultiChainScheduler) Stop() {
 	s.logger.Info("Multi-chain scheduler stopped")
 }
 
+// due reports whether the check named key should run at now, given its
+// interval, and if so records now as its last run. It is atomic per key, so
+// overlapping ticks never both run a check; a clock that goes back never runs
+// one early.
+func (s *MultiChainScheduler) due(key string, interval time.Duration, now time.Time) bool {
+	ran := false
+	s.lastRun.Compute(key, func(last time.Time, loaded bool) (time.Time, xsync.ComputeOp) {
+		if loaded && now.Sub(last) < interval {
+			return last, xsync.CancelOp
+		}
+		ran = true
+		return now, xsync.UpdateOp
+	})
+	return ran
+}
+
+// tick runs every periodic check whose interval has elapsed at now.
+func (s *MultiChainScheduler) tick(now time.Time) {
+	cfg := s.configLoader.Get()
+	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
+
+	for i := range cfg.Networks {
+		network := &cfg.Networks[i]
+		if s.due("height:"+network.Name, network.HeightCheckInterval(), now) {
+			s.checkNetworkNodes(cfg, network.Name)
+		}
+		if s.archivalStore != nil && network.Archival != nil && s.due("archival:"+network.Name, network.Archival.Interval(), now) {
+			s.checkArchivalNetwork(cfg, network)
+		}
+	}
+
+	if s.oracleChecker != nil {
+		_ = s.pool.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
+			defer cancel()
+			s.oracleChecker.CheckDue(ctx, s.checkTimeout(), func(network string, interval time.Duration) bool {
+				return s.due("oracle:"+network, interval, now)
+			})
+		})
+	}
+}
+
 // checkInternalNodes runs height and health checks for all internal nodes
 // using the adapter engine and V2 config types directly.
 func (s *MultiChainScheduler) checkInternalNodes() {
 	cfg := s.configLoader.Get()
 	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
+	s.checkNetworkNodes(cfg, "")
+}
 
+// checkNetworkNodes runs height and health checks for the internal nodes of
+// networkName, or of every network when it is empty.
+func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, networkName string) {
 	for _, node := range cfg.Internals {
 		node := node
+		if networkName != "" && node.Network != networkName {
+			continue
+		}
 
 		network := cfg.FindNetwork(node.Network)
 		if network == nil {
@@ -485,55 +526,66 @@ func (s *MultiChainScheduler) hasArchivalNetworks() bool {
 func (s *MultiChainScheduler) checkArchivalStatus() {
 	cfg := s.configLoader.Get()
 
-	for _, network := range cfg.Networks {
-		if network.Archival == nil {
+	for i := range cfg.Networks {
+		if cfg.Networks[i].Archival != nil {
+			s.checkArchivalNetwork(cfg, &cfg.Networks[i])
+		}
+	}
+}
+
+// checkArchivalNetwork checks whether each internal node of network serves
+// its archival min_height.
+func (s *MultiChainScheduler) checkArchivalNetwork(cfg *config.MultiChainConfig, network *config.MultiChainNetwork) {
+	minHeight := network.Archival.MinHeight
+	checkCfg := s.buildArchivalCheckConfig(network, minHeight)
+	if checkCfg == nil {
+		return
+	}
+
+	for _, node := range cfg.Internals {
+		if node.Network != network.Name {
 			continue
 		}
 
-		minHeight := network.Archival.MinHeight
-		checkCfg := s.buildArchivalCheckConfig(&network, minHeight)
-		if checkCfg == nil {
+		// Get the node URL for the archival check protocol.
+		nodeURL := node.Endpoints[checkCfg.Protocol]
+		if nodeURL == "" {
 			continue
 		}
 
-		for _, node := range cfg.Internals {
-			if node.Network != network.Name {
-				continue
+		node := node
+		checkCfg := *checkCfg
+		_ = s.pool.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
+			defer cancel()
+
+			height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
+			isArchival := err == nil && height > 0
+			// Info only when the status changes; the same answer every
+			// check_interval is Debug.
+			logAt := s.logger.Debug
+			if prev := s.archivalStore.GetStatus(network.Name, node.Name); prev == nil || prev.IsArchival != isArchival {
+				logAt = s.logger.Info
 			}
-
-			// Get the node URL for the archival check protocol.
-			nodeURL := node.Endpoints[checkCfg.Protocol]
-			if nodeURL == "" {
-				continue
-			}
-
-			node := node
-			checkCfg := *checkCfg
-			_ = s.pool.Go(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
-				defer cancel()
-
-				height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
-				if err != nil || height <= 0 {
-					s.archivalStore.SetNotArchival(network.Name, node.Name)
-					s.logger.Info("Node is not archival",
-						zap.String("node", node.Name),
-						zap.String("network", network.Name),
-						zap.Int64("min_height", minHeight),
-						zap.Error(err),
-					)
-					return
-				}
-
-				s.archivalStore.SetArchival(network.Name, node.Name)
-				s.logger.Info("Node confirmed archival",
+			if !isArchival {
+				s.archivalStore.SetNotArchival(network.Name, node.Name)
+				logAt("Node is not archival",
 					zap.String("node", node.Name),
 					zap.String("network", network.Name),
 					zap.Int64("min_height", minHeight),
-					zap.Int64("returned_height", height),
+					zap.Error(err),
 				)
-			})
-		}
+				return
+			}
+
+			s.archivalStore.SetArchival(network.Name, node.Name)
+			logAt("Node confirmed archival",
+				zap.String("node", node.Name),
+				zap.String("network", network.Name),
+				zap.Int64("min_height", minHeight),
+				zap.Int64("returned_height", height),
+			)
+		})
 	}
 }
 

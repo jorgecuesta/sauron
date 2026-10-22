@@ -180,6 +180,18 @@ func validateMultiChainNetwork(net *MultiChainNetwork, index int, names map[stri
 		}
 	}
 
+	// Check intervals: unset means DefaultCheckInterval; anything set must
+	// be at least 1s (the scheduler's tick).
+	if net.HeightCheck != nil && net.HeightCheck.Interval != 0 && net.HeightCheck.Interval < time.Second {
+		return fmt.Errorf("network %d (%s): height_check interval too short: %s (minimum 1s)", index, net.Name, net.HeightCheck.Interval)
+	}
+	if net.Archival != nil && net.Archival.CheckInterval != 0 && net.Archival.CheckInterval < time.Second {
+		return fmt.Errorf("network %d (%s): archival check_interval too short: %s (minimum 1s)", index, net.Name, net.Archival.CheckInterval)
+	}
+	if net.Sync != nil && net.Sync.CheckInterval != 0 && net.Sync.CheckInterval < time.Second {
+		return fmt.Errorf("network %d (%s): sync check_interval too short: %s (minimum 1s)", index, net.Name, net.Sync.CheckInterval)
+	}
+
 	// Sync oracle validation.
 	if net.Sync != nil {
 		if net.Sync.MaxDrift <= 0 {
