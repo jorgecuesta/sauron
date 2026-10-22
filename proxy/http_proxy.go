@@ -101,16 +101,20 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.Bool("websocket", IsWebSocketRequest(r)),
 	)
 
-	// Buffer request body for potential retry.
-	// Read one byte past the limit so an oversized body is rejected, never
-	// forwarded truncated.
+	// Buffer request body for potential retry. A declared length over the
+	// limit is rejected without reading; otherwise read one byte past the
+	// limit so an oversized body is rejected, never forwarded truncated.
+	if r.ContentLength > maxRequestBodySize {
+		p.rejectBodyTooLarge(w, network)
+		return
+	}
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	if int64(len(bodyBytes)) > maxRequestBodySize {
-		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		p.rejectBodyTooLarge(w, network)
 		return
 	}
 
@@ -371,6 +375,13 @@ func isRetriableHTTPCode(code int, retriableCodes []int) bool {
 		}
 	}
 	return false
+}
+
+// rejectBodyTooLarge answers 413 for a body over maxRequestBodySize. No node
+// has been selected yet, so the node label is empty.
+func (p *HTTPProxy) rejectBodyTooLarge(w http.ResponseWriter, network string) {
+	metrics.ProxyErrors.WithLabelValues(network, "", p.endpointType, "413", "body_too_large").Inc()
+	http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
 }
 
 // getCircuitBreakerConfig returns the CircuitBreakerConfig for this proxy's network.

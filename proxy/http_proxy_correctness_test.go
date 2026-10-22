@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -11,9 +12,11 @@ import (
 	"time"
 
 	"sauron/internal/testutil"
+	"sauron/metrics"
 	"sauron/selector"
 	"sauron/storage"
 
+	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 )
 
@@ -226,5 +229,81 @@ func TestHTTPProxy_WebSocketRejectionCountsOnlyBreakerCodes(t *testing.T) {
 				t.Errorf("circuit breaker errors = %d, want %d", got, tt.wantCBErrs)
 			}
 		})
+	}
+}
+
+// countingReader counts the bytes read from it.
+type countingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func bodyTooLargeCount(network string) float64 {
+	var m dto.Metric
+	_ = metrics.ProxyErrors.WithLabelValues(network, "", "rest", "413", "body_too_large").Write(&m)
+	return m.GetCounter().GetValue()
+}
+
+// TestHTTPProxy_OversizedBodyRejectedEarly: a declared Content-Length over the
+// limit is rejected before reading the body; a chunked body (no length) is
+// rejected once it passes the limit. Both are counted as body_too_large.
+func TestHTTPProxy_OversizedBodyRejectedEarly(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	const network = "body-early-net"
+	p, _, _ := newCBHTTPProxy(t, network, backend.URL)
+
+	tests := []struct {
+		name          string
+		size          int64
+		chunked       bool
+		wantCode      int
+		wantMaxRead   int64
+		wantCountDiff float64
+	}{
+		{name: "declared over the limit", size: maxRequestBodySize + 1, wantCode: http.StatusRequestEntityTooLarge, wantMaxRead: 0, wantCountDiff: 1},
+		{name: "chunked over the limit", size: maxRequestBodySize + 1, chunked: true, wantCode: http.StatusRequestEntityTooLarge, wantMaxRead: maxRequestBodySize + 1, wantCountDiff: 1},
+		{name: "chunked at the limit", size: maxRequestBodySize, chunked: true, wantCode: http.StatusOK, wantMaxRead: maxRequestBodySize, wantCountDiff: 0},
+	}
+	for _, tc := range tests {
+		hits.Store(0)
+		before := bodyTooLargeCount(network)
+		body := &countingReader{r: bytes.NewReader(make([]byte, tc.size))}
+		req := httptest.NewRequest(http.MethodPost, "/", body)
+		req.ContentLength = tc.size
+		if tc.chunked {
+			req.ContentLength = -1
+		}
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+
+		if rr.Code != tc.wantCode {
+			t.Errorf("%s: status = %d, want %d", tc.name, rr.Code, tc.wantCode)
+		}
+		if got := body.n.Load(); got > tc.wantMaxRead {
+			t.Errorf("%s: read %d body bytes, want at most %d", tc.name, got, tc.wantMaxRead)
+		}
+		wantHits := int32(0)
+		if tc.wantCode == http.StatusOK {
+			wantHits = 1
+		}
+		if got := hits.Load(); got != wantHits {
+			t.Errorf("%s: backend hits = %d, want %d", tc.name, got, wantHits)
+		}
+		if got := bodyTooLargeCount(network) - before; got != tc.wantCountDiff {
+			t.Errorf("%s: body_too_large count +%v, want +%v", tc.name, got, tc.wantCountDiff)
+		}
 	}
 }
