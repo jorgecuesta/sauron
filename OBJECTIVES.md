@@ -52,7 +52,7 @@ Mark each claim as **measured**, **verified in code**, or **not verified**.
 
 All verified in code by a read-only audit; none measured at runtime.
 
-- **Data race:** `MultiChainScheduler.timeout` is written from several cron goroutines without a lock (`checker/v2_scheduler.go:84, 157, 368, 412`), and the oracle cron reads it. Fix first: it is a concurrency bug.
+- **Data race on `MultiChainScheduler.timeout` — FIXED (2026-10-22).** Several cron jobs wrote it without a lock. After the Go 1.27.3 bump, `-race` caught it in the checker tests. It is now an `atomic.Int64`.
 - **Removed or renamed internal nodes are never forgotten.** Height and health stores have no delete (`storage/heights.go`, `storage/health.go`), so the selector keeps picking the old name. HTTP then skips it and uses up a retry (`proxy/http_proxy.go:139-146`); gRPC returns `Internal` (`proxy/grpc_proxy.go`).
 - **A node URL change leaks the old pooled gRPC connection** until shutdown (`GRPCProxy.connPool`, `ExternalChecker.grpcConnections`).
 - **Removed externals and rings stay routable.** `ExternalEndpointStore` has no delete.

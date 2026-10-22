@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"sauron/adapter"
@@ -37,7 +38,7 @@ type MultiChainScheduler struct {
 	archivalStore *storage.ArchivalStore
 	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
-	timeout       time.Duration
+	timeout       atomic.Int64 // health-check timeout (ns); written by every cron job, so atomic
 }
 
 // NewMultiChainScheduler creates a scheduler with adapter-driven checks.
@@ -56,7 +57,7 @@ func NewMultiChainScheduler(
 ) *MultiChainScheduler {
 	extChecker := NewExternalChecker(heightStore, endpointStore, configLoader, logger)
 
-	return &MultiChainScheduler{
+	s := &MultiChainScheduler{
 		cron: cron.New(
 			cron.WithSeconds(),
 			cron.WithChain(cron.Recover(cron.DefaultLogger)),
@@ -73,15 +74,21 @@ func NewMultiChainScheduler(
 		archivalStore: archivalStore,
 		configLoader:  configLoader,
 		logger:        logger,
-		timeout:       5 * time.Second,
 	}
+	s.timeout.Store(int64(5 * time.Second))
+	return s
+}
+
+// checkTimeout returns the current health-check timeout.
+func (s *MultiChainScheduler) checkTimeout() time.Duration {
+	return time.Duration(s.timeout.Load())
 }
 
 // Start begins scheduled checks. Each network gets its own height check
 // interval based on config; health checks and externals use fixed intervals.
 func (s *MultiChainScheduler) Start() error {
 	cfg := s.configLoader.Get()
-	s.timeout = cfg.Timeouts.HealthCheck
+	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
 
 	// Schedule internal node checks every 30 seconds.
 	_, err := s.cron.AddFunc("*/30 * * * * *", func() {
@@ -110,9 +117,9 @@ func (s *MultiChainScheduler) Start() error {
 	// Schedule oracle checks every 30 seconds if oracles are configured.
 	if s.oracleChecker != nil && len(s.oracleChecker.Networks()) > 0 {
 		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 			defer cancel()
-			s.oracleChecker.CheckAll(ctx, s.timeout)
+			s.oracleChecker.CheckAll(ctx, s.checkTimeout())
 		})
 		if err != nil {
 			return fmt.Errorf("multi-chain scheduler: failed to add oracle check cron: %w", err)
@@ -135,7 +142,7 @@ func (s *MultiChainScheduler) Start() error {
 
 	s.cron.Start()
 	s.logger.Info("Multi-chain scheduler started",
-		zap.Duration("health_check_timeout", s.timeout),
+		zap.Duration("health_check_timeout", s.checkTimeout()),
 	)
 
 	return nil
@@ -154,7 +161,7 @@ func (s *MultiChainScheduler) Stop() {
 // using the adapter engine and V2 config types directly.
 func (s *MultiChainScheduler) checkInternalNodes() {
 	cfg := s.configLoader.Get()
-	s.timeout = cfg.Timeouts.HealthCheck
+	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
 
 	for _, node := range cfg.Internals {
 		node := node
@@ -205,7 +212,7 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 		// Skip gRPC height checks — engine only handles HTTP.
 		if !checkCfg.IsGRPC {
 			_ = s.pool.Go(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
 				start := time.Now()
@@ -262,7 +269,7 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 // scheduleHTTPHealthCheck runs an HTTP health check via the adapter engine.
 func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode, nodeURL string, hc adapter.HealthCheckConfig) {
 	_ = s.pool.Go(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
 		err := s.engine.CheckHealth(ctx, hc, urlutil.NormalizeURL(nodeURL))
@@ -283,7 +290,7 @@ func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode
 // dialing and waiting for the connection to reach the READY state.
 func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode, grpcAddr string, protocol string) {
 	_ = s.pool.Go(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
 		cfg := s.configLoader.Get()
@@ -342,7 +349,7 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 // using the existing CheckWebSocket function.
 func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL string, protocol string) {
 	_ = s.pool.Go(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
 		// CheckWebSocket expects an HTTP URL and converts to WS internally.
@@ -365,7 +372,7 @@ func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChai
 // checkExternalRings delegates to the existing ExternalChecker.
 func (s *MultiChainScheduler) checkExternalRings() {
 	cfg := s.configLoader.Get()
-	s.timeout = cfg.Timeouts.HealthCheck
+	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
 
 	networks := s.getAllNetworks(cfg)
 
@@ -376,7 +383,7 @@ func (s *MultiChainScheduler) checkExternalRings() {
 			network := network
 
 			_ = s.pool.Go(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
 				if err := s.extChecker.CheckExternal(ctx, external, network); err != nil {
@@ -409,9 +416,9 @@ func (s *MultiChainScheduler) getAllNetworks(cfg *config.MultiChainConfig) []str
 
 func (s *MultiChainScheduler) recoverFailedEndpoints() {
 	cfg := s.configLoader.Get()
-	s.timeout = cfg.Timeouts.HealthCheck
+	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 	defer cancel()
 
 	s.extChecker.RecoverFailedEndpoints(ctx)
@@ -461,7 +468,7 @@ func (s *MultiChainScheduler) checkArchivalStatus() {
 			node := node
 			checkCfg := *checkCfg
 			_ = s.pool.Go(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
 				height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
