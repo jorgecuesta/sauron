@@ -513,13 +513,8 @@ func TestScheduleGRPCHealthCheck_Healthy(t *testing.T) {
 func TestScheduleGRPCHealthCheck_Unhealthy(t *testing.T) {
 	t.Parallel()
 
-	// Bind and immediately close to get a port that nothing listens on.
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	closedAddr := lis.Addr().String()
-	_ = lis.Close()
+	// Port 1 is privileged and never bound by tests: the dial is refused.
+	closedAddr := "127.0.0.1:1"
 
 	sched, healthStore := testHealthCheckScheduler(t)
 	// Short timeout so the test doesn't hang on connection attempts.
