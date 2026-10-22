@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -558,5 +560,144 @@ func TestGRPCProxy_NoErrorLogsForRelayedBackendStatus(t *testing.T) {
 		for _, e := range logs.All() {
 			t.Errorf("unexpected Error log: %q %v", e.Message, e.ContextMap())
 		}
+	}
+}
+
+// proxyErrCount reads ProxyErrors for the shared test node.
+func proxyErrCount(code codes.Code, reason string) float64 {
+	var m dto.Metric
+	c := metrics.ProxyErrors.WithLabelValues("testnet", "node-1", "grpc", strconv.Itoa(int(code)), reason)
+	if err := c.Write(&m); err != nil {
+		return 0
+	}
+	return m.GetCounter().GetValue()
+}
+
+// TestGRPCProxy_ClientCancelLogsNoErrors: a client cancelling a call while the
+// backend is still working (a slow query) is routine and must not produce
+// Error-level logs. Which forwarding goroutine notices the cancel first is a
+// race, so the call is repeated to cover both orders.
+func TestGRPCProxy_ClientCancelLogsNoErrors(t *testing.T) {
+	t.Parallel()
+
+	const service = "cancel.Service"
+	const calls = 20
+	core, logs := observer.New(zapcore.ErrorLevel)
+	handler := func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			return err
+		}
+		<-stream.Context().Done() // a slow query: never answers before the cancel
+		return stream.Context().Err()
+	}
+	h := setupGRPCProxyTestWithOpts(t, handler, grpcProxyTestOpts{logger: zap.New(core)})
+
+	for i := 0; i < calls; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		stream, err := h.conn.NewStream(ctx,
+			&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
+			"/"+service+"/Slow",
+		)
+		if err != nil {
+			t.Fatalf("NewStream: %v", err)
+		}
+		if err := stream.SendMsg(&rawFrame{payload: []byte("q")}); err != nil {
+			t.Fatalf("SendMsg: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var m dto.Metric
+		_ = metrics.NodeRequests.WithLabelValues("testnet", "node-1", "grpc", service).Write(&m)
+		if m.GetCounter().GetValue() >= calls {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %v of %d calls finished", m.GetCounter().GetValue(), calls)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // let the forwarding goroutines wind down
+
+	for _, e := range logs.All() {
+		t.Errorf("unexpected Error log: %q %v", e.Message, e.ContextMap())
+	}
+}
+
+// TestGRPCProxy_ProxySideErrorKeepsCleanMessage: an error raised on the proxy
+// side (here, a request over the backend send limit) must reach the client as
+// a plain gRPC status, without the proxy's internal "send to backend:" wording.
+func TestGRPCProxy_ProxySideErrorKeepsCleanMessage(t *testing.T) {
+	t.Parallel()
+
+	handler := func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		return stream.RecvMsg(&f)
+	}
+	h := setupGRPCProxyTestWithOpts(t, handler, grpcProxyTestOpts{maxSend: 1024})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := h.conn.NewStream(ctx,
+		&grpc.StreamDesc{ServerStreams: true, ClientStreams: true},
+		"/big.Service/Upload",
+	)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := stream.SendMsg(&rawFrame{payload: make([]byte, 4096)}); err != nil {
+		t.Fatalf("SendMsg: %v", err)
+	}
+	_ = stream.CloseSend()
+	var f rawFrame
+	err = stream.RecvMsg(&f)
+
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("error is not a gRPC status: %v", err)
+	}
+	if st.Code() != codes.ResourceExhausted {
+		t.Errorf("code = %s, want ResourceExhausted", st.Code())
+	}
+	for _, internal := range []string{"send to backend", "recv from client", "send to client", "rpc error:"} {
+		if strings.Contains(st.Message(), internal) {
+			t.Errorf("message %q leaks proxy-internal wording %q", st.Message(), internal)
+		}
+	}
+}
+
+// TestGRPCProxy_ProxyErrorsReasonByOrigin: ProxyErrors must tell a relayed
+// backend status apart from a failure of the proxy. Not parallel: it reads
+// global counters that parallel tests would also move.
+func TestGRPCProxy_ProxyErrorsReasonByOrigin(t *testing.T) {
+	handler := func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			return err
+		}
+		return status.Error(codes.NotFound, "claim not found")
+	}
+	h := setupGRPCProxyTest(t, handler)
+
+	backendBefore := proxyErrCount(codes.NotFound, "backend_status")
+	proxyBefore := proxyErrCount(codes.NotFound, "proxy_error")
+
+	res := rawCall(t, h.conn, "/reason.Service/NotFound")
+	if status.Code(res.err) != codes.NotFound {
+		t.Fatalf("err = %v, want NotFound", res.err)
+	}
+	if !waitHandlerFinished("reason.Service", 3*time.Second) {
+		t.Fatal("proxy handler did not finish")
+	}
+
+	if got := proxyErrCount(codes.NotFound, "backend_status") - backendBefore; got != 1 {
+		t.Errorf("ProxyErrors{reason=backend_status} delta = %v, want 1", got)
+	}
+	if got := proxyErrCount(codes.NotFound, "proxy_error") - proxyBefore; got != 0 {
+		t.Errorf("ProxyErrors{reason=proxy_error} delta = %v, want 0", got)
 	}
 }
