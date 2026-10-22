@@ -174,6 +174,17 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		statusCode, fwdErr := p.forwardRequest(w, r, targetURL, bodyBytes, nodeName, network, start, decision, cbCfg)
 
 		if fwdErr != nil {
+			if r.Context().Err() != nil {
+				// The client went away: not the node's fault, and nobody is left
+				// to receive a retry.
+				metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "0", "client_cancel").Inc()
+				p.logger.Debug("Client cancelled request",
+					zap.String("network", network),
+					zap.String("node", nodeName),
+					zap.Error(r.Context().Err()),
+				)
+				return
+			}
 			// Record circuit-breaker error for connection failures and retriable codes.
 			if p.circuitBreaker != nil && cbCfg != nil {
 				p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
