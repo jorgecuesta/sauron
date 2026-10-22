@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ type WSProxyError struct {
 	// Category matches the original metric error labels:
 	// "backend_connect_error", "upgrade_forward_error",
 	// "upgrade_response_error", "upgrade_client_error", "websocket_error",
+	// "upgrade_rejected" (the backend answered the upgrade with a non-101),
 	// "client_disconnect" (the client dropped the connection; not a node failure).
 	Category   string
 	StatusCode int
@@ -123,6 +125,16 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 	// Forward the response to the client.
 	if err := resp.Write(clientConn); err != nil {
 		return 502, &WSProxyError{Category: "upgrade_client_error", StatusCode: 502, Err: err}
+	}
+
+	// Anything but 101 means the backend refused the WebSocket: the client has
+	// its answer, and there is no connection to copy.
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return resp.StatusCode, &WSProxyError{
+			Category:   "upgrade_rejected",
+			StatusCode: resp.StatusCode,
+			Err:        errors.New("backend refused the WebSocket upgrade: " + resp.Status),
+		}
 	}
 
 	logger.Debug("WebSocket upgrade successful, starting bidirectional copy",

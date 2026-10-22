@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -17,8 +18,9 @@ import (
 )
 
 // newCBHTTPProxy wires an HTTPProxy with a circuit breaker (threshold 100,
-// 2 retries) in front of backendURL for network/type rest.
-func newCBHTTPProxy(t *testing.T, network, backendURL string) (*HTTPProxy, *CircuitBreaker) {
+// 2 retries) in front of backendURL for network/type rest. The height store is
+// returned so a test can mark the node's WebSocket support.
+func newCBHTTPProxy(t *testing.T, network, backendURL string) (*HTTPProxy, *CircuitBreaker, *storage.HeightStore) {
 	t.Helper()
 	yaml := `
 listen: ":3000"
@@ -54,7 +56,7 @@ internals:
 	sel := selector.NewSelector(heightStore, endpointStore, cfgLoader, zap.NewNop())
 	sel.SetHealthStore(healthStore)
 	cb := NewCircuitBreaker(healthStore, zap.NewNop())
-	return NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", network, cb), cb
+	return NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", network, cb), cb, heightStore
 }
 
 // TestHTTPProxy_ClientCancelIsNotABackendFailure (#12): a client that gives up
@@ -74,7 +76,7 @@ func TestHTTPProxy_ClientCancelIsNotABackendFailure(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	p, cb := newCBHTTPProxy(t, "cancel-net", backend.URL)
+	p, cb, _ := newCBHTTPProxy(t, "cancel-net", backend.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -101,7 +103,7 @@ func TestHTTPProxy_OversizedBodyRejected(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	p, _ := newCBHTTPProxy(t, "body-net", backend.URL)
+	p, _, _ := newCBHTTPProxy(t, "body-net", backend.URL)
 
 	tests := []struct {
 		name     string
@@ -130,3 +132,99 @@ func TestHTTPProxy_OversizedBodyRejected(t *testing.T) {
 // answers the upgrade with anything but 101 refused the WebSocket. The client
 // gets that response, and the call is reported as a backend error, not a
 // success that starts a copy loop.
+func TestProxyWebSocket_NonSwitchingResponseIsBackendError(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []int{http.StatusServiceUnavailable, http.StatusBadRequest, http.StatusOK} {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		resultCh := make(chan error, 1)
+		statusCh := make(chan int, 1)
+		proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop())
+			statusCh <- s
+			resultCh <- err
+		}))
+
+		req, _ := http.NewRequest(http.MethodGet, proxySrv.URL+"/websocket", nil)
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("backend %d: request: %v", code, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != code {
+			t.Errorf("backend %d: client got %d, want the backend's status", code, resp.StatusCode)
+		}
+
+		select {
+		case err := <-resultCh:
+			gotStatus := <-statusCh
+			var wsErr *WSProxyError
+			if !errors.As(err, &wsErr) || wsErr.Category != "upgrade_rejected" {
+				t.Errorf("backend %d: err = %v, want WSProxyError category upgrade_rejected", code, err)
+			}
+			if gotStatus != code {
+				t.Errorf("backend %d: returned status %d", code, gotStatus)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("backend %d: ProxyWebSocket did not return (copy loop started on a refused upgrade)", code)
+		}
+		proxySrv.Close()
+		backend.Close()
+	}
+}
+
+// TestHTTPProxy_WebSocketRejectionCountsOnlyBreakerCodes: a refused upgrade
+// counts against the node only when its status is one the circuit breaker is
+// configured for. A 400 answers a bad client handshake and says nothing about
+// the node; counting it would let any client open a healthy node's breaker.
+func TestHTTPProxy_WebSocketRejectionCountsOnlyBreakerCodes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		network     string
+		backendCode int
+		wantCBErrs  int
+	}{
+		{name: "breaker code counts", network: "ws-503-net", backendCode: http.StatusServiceUnavailable, wantCBErrs: 1},
+		{name: "client error does not count", network: "ws-400-net", backendCode: http.StatusBadRequest, wantCBErrs: 0},
+		{name: "non-breaker 5xx does not count", network: "ws-500-net", backendCode: http.StatusInternalServerError, wantCBErrs: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.backendCode)
+			}))
+			defer backend.Close()
+
+			p, cb, heights := newCBHTTPProxy(t, tt.network, backend.URL)
+			heights.UpdateWebSocketAvailability(tt.network, "node-1", "rpc", true)
+			proxySrv := httptest.NewServer(p)
+			defer proxySrv.Close()
+
+			req, _ := http.NewRequest(http.MethodGet, proxySrv.URL+"/websocket", nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tt.backendCode {
+				t.Errorf("client got %d, want the backend's %d", resp.StatusCode, tt.backendCode)
+			}
+			if got := cb.GetErrorCount(tt.network, "node-1", "rest"); got != tt.wantCBErrs {
+				t.Errorf("circuit breaker errors = %d, want %d", got, tt.wantCBErrs)
+			}
+		})
+	}
+}

@@ -420,9 +420,13 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, errCategory).Inc()
 
 		// Record circuit-breaker error for WebSocket backend failures; a client
-		// dropping its connection says nothing about the node.
+		// dropping its connection says nothing about the node, and a refused
+		// upgrade counts only for the configured codes, as on the HTTP path
+		// (a 400 answers a bad client handshake).
 		cbCfg := p.getCircuitBreakerConfig()
-		if p.circuitBreaker != nil && cbCfg != nil && errCategory != "client_disconnect" {
+		countsAgainstNode := errCategory != "client_disconnect" &&
+			(errCategory != "upgrade_rejected" || (cbCfg != nil && isRetriableHTTPCode(statusCode, cbCfg.HTTPCodes)))
+		if p.circuitBreaker != nil && cbCfg != nil && countsAgainstNode {
 			p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
 		}
 	} else {
