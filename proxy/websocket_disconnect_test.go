@@ -97,7 +97,7 @@ func TestProxyWebSocket_DisconnectCategory(t *testing.T) {
 			backend := wsEchoBackend(t, tc.backendReset)
 			resultCh := make(chan error, 1)
 			proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop())
+				_, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop(), 0)
 				resultCh <- err
 			}))
 			t.Cleanup(proxySrv.Close)
@@ -251,7 +251,7 @@ func TestProxyWebSocket_ClientGracefulCloseDuringPush(t *testing.T) {
 	backend := wsFloodBackend(t)
 	resultCh := make(chan error, 1)
 	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop())
+		_, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop(), 0)
 		resultCh <- err
 	}))
 	t.Cleanup(proxySrv.Close)

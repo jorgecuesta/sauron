@@ -54,6 +54,7 @@ listen: ":3000"
 timeouts:
   health_check: 5s
   proxy: 60s
+  websocket_idle: 90s  # Close a WebSocket after this long without backend bytes
 
 networks:
   - name: "pocket"

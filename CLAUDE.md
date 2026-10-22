@@ -124,6 +124,7 @@ external_failover_threshold: 2  # Blocks behind before using externals
 timeouts:
   health_check: 5s
   proxy: 60s
+  websocket_idle: 90s   # Close a WebSocket after this long without backend bytes
 
 rate_limit:
   enabled: true

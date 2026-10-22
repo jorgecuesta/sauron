@@ -142,7 +142,7 @@ func TestProxyWebSocket_NonSwitchingResponseIsBackendError(t *testing.T) {
 		resultCh := make(chan error, 1)
 		statusCh := make(chan int, 1)
 		proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop())
+			s, err := ProxyWebSocket(w, r, backend.URL, zap.NewNop(), 0)
 			statusCh <- s
 			resultCh <- err
 		}))

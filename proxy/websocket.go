@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ type WSProxyError struct {
 	// "backend_connect_error", "upgrade_forward_error",
 	// "upgrade_response_error", "upgrade_client_error", "websocket_error",
 	// "upgrade_rejected" (the backend answered the upgrade with a non-101),
+	// "websocket_idle_timeout" (the backend sent nothing for the idle timeout),
 	// "client_disconnect" (the client dropped the connection; not a node failure).
 	Category   string
 	StatusCode int
@@ -45,10 +47,14 @@ func IsWebSocketRequest(r *http.Request) bool {
 // ws:// or wss:// internally. The request path and query string from r are
 // appended to the backend URL.
 //
+// idleTimeout closes the session when the backend sends nothing for that long
+// (0 disables it). TCP keepalive already catches a backend whose host is gone;
+// this catches one that is hung while its kernel still answers.
+//
 // Returns the backend's HTTP response status code (0 if the backend was never
 // reached) and any error. Errors are always *WSProxyError with a Category
 // field for granular metric recording.
-func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, logger *zap.Logger) (statusCode int, err error) {
+func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, logger *zap.Logger, idleTimeout time.Duration) (statusCode int, err error) {
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		return 0, &WSProxyError{Category: "backend_connect_error", Err: err}
@@ -155,13 +161,16 @@ func ProxyWebSocket(w http.ResponseWriter, r *http.Request, backendURL string, l
 		errChan <- wsCopyResult{err: copyErr, clientSide: src.err != nil}
 	}()
 	go func() {
-		n, copyErr := io.Copy(clientConn, backendBuf)
+		n, idle, copyErr := copyBackendToClient(clientConn, backendConn, backendBuf, idleTimeout)
 		logger.Debug("Backend->Client copy finished", zap.Int64("bytes", n), zap.Error(copyErr))
-		errChan <- wsCopyResult{err: copyErr, backendToClient: true}
+		errChan <- wsCopyResult{err: copyErr, backendToClient: true, idle: idle}
 	}()
 
 	// Wait for one direction to finish.
 	res := <-errChan
+	if res.idle {
+		return resp.StatusCode, &WSProxyError{Category: "websocket_idle_timeout", StatusCode: resp.StatusCode, Err: res.err}
+	}
 	if res.err != nil && res.err != io.EOF {
 		clientSide := res.clientSide
 		if res.backendToClient {
@@ -193,6 +202,35 @@ type wsCopyResult struct {
 	err             error
 	clientSide      bool // failed reading the client (client->backend only)
 	backendToClient bool
+	idle            bool // the backend sent nothing for the idle timeout
+}
+
+// copyBackendToClient copies backend->client until either side ends, closing
+// on idleTimeout without backend bytes (0 disables it).
+//
+// The deadline works in windows so io.Copy keeps its splice fast path: a
+// read deadline is armed for one window, and when it fires a window that moved
+// bytes re-arms it, while an empty window means the backend is idle. Idle is
+// thus detected between one and two windows after the last byte. A read
+// timeout neither loses spliced data nor breaks the connection.
+func copyBackendToClient(clientConn io.Writer, backendConn net.Conn, backendBuf io.Reader, idleTimeout time.Duration) (total int64, idle bool, err error) {
+	if idleTimeout <= 0 {
+		total, err = io.Copy(clientConn, backendBuf)
+		return total, false, err
+	}
+	for {
+		if err := backendConn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
+			return total, false, err
+		}
+		n, copyErr := io.Copy(clientConn, backendBuf)
+		total += n
+		if !errors.Is(copyErr, os.ErrDeadlineExceeded) {
+			return total, false, copyErr
+		}
+		if n == 0 {
+			return total, true, copyErr
+		}
+	}
 }
 
 // clientReadRecorder records a non-EOF error from reading the client.

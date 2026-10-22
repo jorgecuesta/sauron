@@ -91,6 +91,9 @@ func validateMultiChainTimeouts(t *Timeouts) error {
 	if t.Proxy < time.Second {
 		return fmt.Errorf("proxy timeout too short: %s (minimum 1s)", t.Proxy)
 	}
+	if t.WebSocketIdle != 0 && t.WebSocketIdle < time.Second {
+		return fmt.Errorf("websocket_idle timeout too short: %s (minimum 1s, or unset for the default %s)", t.WebSocketIdle, DefaultWebSocketIdle)
+	}
 	return nil
 }
 

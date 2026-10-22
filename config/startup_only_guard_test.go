@@ -22,6 +22,7 @@ var configFieldClass = map[string]string{
 	"auth":                                 "startup",
 	"timeouts.health_check":                "live",
 	"timeouts.proxy":                       "startup",
+	"timeouts.websocket_idle":              "live", // read per WebSocket connection in handleWebSocket
 	"grpc_keepalive.time":                  "startup",
 	"grpc_keepalive.timeout":               "startup",
 	"grpc_keepalive.permit_without_stream": "startup",

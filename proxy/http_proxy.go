@@ -393,7 +393,7 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 		zap.String("network", network),
 	)
 
-	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger)
+	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger, p.configLoader.Get().Timeouts.WebSocketIdleTimeout())
 	duration := time.Since(start)
 
 	statusStr := strconv.Itoa(statusCode)

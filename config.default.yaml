@@ -14,6 +14,7 @@ external_failover_threshold: 2
 timeouts:
   health_check: 5s  # Health/height check timeout
   proxy: 60s        # Timeout for proxied requests
+  websocket_idle: 90s  # Close a WebSocket after this long without backend bytes (default 90s)
 
 # gRPC client keepalive settings
 # 'time' must be >= the server's MinPingTime (default 5m in Go gRPC)
