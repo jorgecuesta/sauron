@@ -565,6 +565,38 @@ func normalizeGRPCMethod(method string) string {
 }
 
 // Close closes all pooled connections. It is idempotent; subsequent calls are no-ops.
+// CloseConnectionsExcept closes and drops every pooled backend connection
+// whose address keep rejects (a node removed or moved to another URL), and
+// returns how many it closed. Streams still open on such a connection fail.
+func (p *GRPCProxy) CloseConnectionsExcept(keep func(addr string) bool) int {
+	p.connMu.Lock()
+	defer p.connMu.Unlock()
+
+	n := 0
+	for addr, conn := range p.connPool {
+		if keep(addr) {
+			continue
+		}
+		if err := conn.Close(); err != nil {
+			p.logger.Warn("Failed to close gRPC connection", zap.String("addr", addr), zap.Error(err))
+		}
+		delete(p.connPool, addr)
+		n++
+	}
+	return n
+}
+
+// PooledAddresses returns the backend addresses with a pooled connection.
+func (p *GRPCProxy) PooledAddresses() []string {
+	p.connMu.RLock()
+	defer p.connMu.RUnlock()
+	addrs := make([]string, 0, len(p.connPool))
+	for addr := range p.connPool {
+		addrs = append(addrs, addr)
+	}
+	return addrs
+}
+
 func (p *GRPCProxy) Close() error {
 	var closeErr error
 	p.closeOnce.Do(func() {

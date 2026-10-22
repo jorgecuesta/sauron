@@ -82,6 +82,23 @@ func (cb *CircuitBreaker) GetErrorCount(network, node, protocol string) int {
 	return 0
 }
 
+// RemoveNodes forgets the error counts of every node for which keep returns
+// false (a node gone from the config), and returns how many it removed.
+func (cb *CircuitBreaker) RemoveNodes(keep func(network, node string) bool) int {
+	if cb == nil {
+		return 0
+	}
+	n := 0
+	cb.errors.Range(func(key string, _ *atomic.Int32) bool {
+		if network, node, ok := storage.SplitNodeKey(key, true); ok && !keep(network, node) {
+			cb.errors.Delete(key)
+			n++
+		}
+		return true
+	})
+	return n
+}
+
 // networkCircuitBreakerConfig returns network's circuit breaker config from
 // the current config, or nil when the network has none.
 func networkCircuitBreakerConfig(loader *config.MultiChainLoader, network string) *config.CircuitBreakerConfig {

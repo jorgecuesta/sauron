@@ -430,6 +430,24 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 	}
 }
 
+// CloseConnectionsExcept closes and drops every cached gRPC connection whose
+// endpoint URL keep rejects (no longer advertised by a configured ring), and
+// returns how many it closed.
+func (c *ExternalChecker) CloseConnectionsExcept(keep func(url string) bool) int {
+	n := 0
+	c.grpcConnections.Range(func(url string, conn *grpc.ClientConn) bool {
+		if keep(url) {
+			return true
+		}
+		if _, loaded := c.grpcConnections.LoadAndDelete(url); loaded {
+			_ = conn.Close()
+			n++
+		}
+		return true
+	})
+	return n
+}
+
 // UpdateEndpointMetrics updates aggregate endpoint metrics
 func (c *ExternalChecker) UpdateEndpointMetrics() {
 	c.endpointStore.UpdateAggregateMetrics()

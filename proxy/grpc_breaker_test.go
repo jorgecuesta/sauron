@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -364,4 +365,75 @@ func TestGRPCProxy_ConfiguredGRPCCodes(t *testing.T) {
 			t.Error("node-b excluded for ResourceExhausted under the default set")
 		}
 	})
+}
+
+// #20: when a node's gRPC URL changes or the node is removed, the proxy closes
+// the pooled connection to the old address instead of leaking it; a kept
+// address keeps its connection.
+func TestGRPCProxy_CloseConnectionsExcept(t *testing.T) {
+	t.Parallel()
+	h := setupGRPCProxyTest(t, func(_ interface{}, stream grpc.ServerStream) error {
+		var f rawFrame
+		if err := stream.RecvMsg(&f); err != nil {
+			return err
+		}
+		return stream.SendMsg(&f)
+	})
+	echo := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		stream, err := h.conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true, ClientStreams: true}, "/test.Service/Echo")
+		if err != nil {
+			return err
+		}
+		if err := stream.SendMsg(&rawFrame{payload: []byte("x")}); err != nil {
+			return err
+		}
+		_ = stream.CloseSend()
+		var f rawFrame
+		return stream.RecvMsg(&f)
+	}
+	if err := echo(); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	h.proxy.connMu.RLock()
+	var addr string
+	var conn *grpc.ClientConn
+	for a, c := range h.proxy.connPool {
+		addr, conn = a, c
+	}
+	h.proxy.connMu.RUnlock()
+	if conn == nil {
+		t.Fatal("no pooled connection after a call")
+	}
+
+	if n := h.proxy.CloseConnectionsExcept(func(a string) bool { return a == addr }); n != 0 {
+		t.Errorf("closed %d connections for a kept address", n)
+	}
+	if conn.GetState() == connectivity.Shutdown {
+		t.Fatal("kept connection was closed")
+	}
+
+	if n := h.proxy.CloseConnectionsExcept(func(string) bool { return false }); n != 1 {
+		t.Errorf("closed %d connections, want 1", n)
+	}
+	if conn.GetState() != connectivity.Shutdown {
+		t.Errorf("removed address's connection state = %s, want SHUTDOWN", conn.GetState())
+	}
+	h.proxy.connMu.RLock()
+	left := len(h.proxy.connPool)
+	h.proxy.connMu.RUnlock()
+	if left != 0 {
+		t.Errorf("%d connections left in the pool", left)
+	}
+	// A node still routed to the address gets a fresh connection.
+	if err := echo(); err != nil {
+		t.Errorf("call after cleanup: %v", err)
+	}
+	// After Close, cleanup is a no-op.
+	_ = h.proxy.Close()
+	if n := h.proxy.CloseConnectionsExcept(func(string) bool { return false }); n != 0 {
+		t.Errorf("cleanup after Close closed %d", n)
+	}
 }

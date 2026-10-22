@@ -13,8 +13,11 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/keepalive"
 
 	"sauron/config"
+	"sauron/internal/grpcutil"
 	"sauron/internal/testutil"
 	"sauron/metrics"
 	"sauron/storage"
@@ -1124,5 +1127,50 @@ func TestCheckExternal_RingDownKeepsLiveEndpoints(t *testing.T) {
 	}
 	if len(endpointStore.GetFailedEndpoints()) != 0 {
 		t.Error("live endpoint marked failed because its ring is down")
+	}
+}
+
+// #20: connections to external gRPC endpoints that are no longer advertised
+// (external or ring removed) are closed instead of leaking until shutdown.
+func TestExternalChecker_CloseConnectionsExcept(t *testing.T) {
+	t.Parallel()
+	lisA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = lisA.Close() }()
+	lisB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = lisB.Close() }()
+
+	checker, _, _ := newTestExternalChecker(t, nil)
+	connA, err := grpcutil.NewConnection(lisA.Addr().String(), true, keepalive.ClientParameters{})
+	if err != nil {
+		t.Fatalf("conn A: %v", err)
+	}
+	connB, err := grpcutil.NewConnection(lisB.Addr().String(), true, keepalive.ClientParameters{})
+	if err != nil {
+		t.Fatalf("conn B: %v", err)
+	}
+	checker.grpcConnections.Store(lisA.Addr().String(), connA)
+	checker.grpcConnections.Store(lisB.Addr().String(), connB)
+
+	keepA := func(url string) bool { return url == lisA.Addr().String() }
+	if n := checker.CloseConnectionsExcept(keepA); n != 1 {
+		t.Errorf("closed %d, want 1", n)
+	}
+	if connB.GetState() != connectivity.Shutdown {
+		t.Errorf("dropped connection state = %s, want SHUTDOWN", connB.GetState())
+	}
+	if connA.GetState() == connectivity.Shutdown {
+		t.Error("kept connection closed")
+	}
+	if _, ok := checker.grpcConnections.Load(lisB.Addr().String()); ok {
+		t.Error("dropped connection still cached")
+	}
+	if _, ok := checker.grpcConnections.Load(lisA.Addr().String()); !ok {
+		t.Error("kept connection no longer cached")
 	}
 }

@@ -23,7 +23,19 @@ type MultiChainLoader struct {
 	logger   *zap.Logger
 	v        *viper.Viper
 	path     string
-	reloadMu sync.Mutex // serializes read+store so the newest file always wins
+	reloadMu sync.Mutex                // serializes read+store so the newest file always wins
+	onReload []func(*MultiChainConfig) // guarded by reloadMu
+}
+
+// OnReload registers fn to run after every reload that changes the running
+// config (including one that keeps startup-only fields), with the config now
+// in effect. Subscribers run in registration order, serialized with reloads,
+// so they see configs in the order they were applied; they must not call
+// Reload or OnReload.
+func (l *MultiChainLoader) OnReload(fn func(*MultiChainConfig)) {
+	l.reloadMu.Lock()
+	defer l.reloadMu.Unlock()
+	l.onReload = append(l.onReload, fn)
 }
 
 // ErrRestartRequired is returned by Reload when the new file changes fields the
@@ -114,12 +126,19 @@ func (l *MultiChainLoader) Reload() error {
 	l.reloadMu.Lock()
 	defer l.reloadMu.Unlock()
 
-	if err := l.reload(); err != nil {
+	err := l.reload()
+	if err != nil {
 		metrics.ConfigReloadOK.Set(0)
-		return err
+	} else {
+		metrics.ConfigReloadOK.Set(1)
 	}
-	metrics.ConfigReloadOK.Set(1)
-	return nil
+	if err == nil || errors.Is(err, ErrRestartRequired) {
+		cfg := l.Get()
+		for _, fn := range l.onReload {
+			fn(cfg)
+		}
+	}
+	return err
 }
 
 func (l *MultiChainLoader) reload() error {

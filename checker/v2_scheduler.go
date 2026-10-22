@@ -142,6 +142,12 @@ func (s *MultiChainScheduler) Start() error {
 	return nil
 }
 
+// CloseExternalConnectionsExcept closes the external checker's cached gRPC
+// connections whose URL keep rejects; see ExternalChecker.CloseConnectionsExcept.
+func (s *MultiChainScheduler) CloseExternalConnectionsExcept(keep func(url string) bool) int {
+	return s.extChecker.CloseConnectionsExcept(keep)
+}
+
 // Stop halts the scheduler and closes resources.
 func (s *MultiChainScheduler) Stop() {
 	s.logger.Info("Stopping multi-chain scheduler...")
