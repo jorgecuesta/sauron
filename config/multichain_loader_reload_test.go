@@ -398,6 +398,18 @@ func TestMultiChainLoader_Reload_KeepsStartupOnlyFieldsAppliesTheRest(t *testing
 				t.Error("added network applied although it has no listener")
 			}
 		}},
+		{"network type", func(y string) string { return strings.Replace(y, "type: evm", "type: solana", 1) }, "networks[eth].type",
+			func(t *testing.T, c *MultiChainConfig) { eq(t, findNetwork(c, "eth").Type, "evm") }},
+		{"grpc message size", func(y string) string {
+			return strings.Replace(y, "        advertise: \"sauron-grpc:443\"\n", "        advertise: \"sauron-grpc:443\"\n        grpc_max_recv_msg_size: 1048576\n", 1)
+		}, "networks[pocket].endpoints", func(t *testing.T, c *MultiChainConfig) {
+			eq(t, findNetwork(c, "pocket").Endpoints[1].GRPCMaxRecvMsgSize, 0)
+		}},
+		{"endpoint removed", func(y string) string {
+			return strings.Replace(y, "      - protocol: grpc\n        listen: \":8082\"\n        advertise: \"sauron-grpc:443\"\n", "", 1)
+		}, "networks[pocket].endpoints", func(t *testing.T, c *MultiChainConfig) {
+			eq(t, len(findNetwork(c, "pocket").Endpoints), 2)
+		}},
 		{"grpc_insecure with same url", func(y string) string { return strings.Replace(y, "grpc_insecure: true", "grpc_insecure: false", 1) }, "internals[seed-one].grpc_insecure",
 			func(t *testing.T, c *MultiChainConfig) { eq(t, c.Internals[0].GRPCInsecure, true) }},
 	}
@@ -623,5 +635,27 @@ func TestMultiChainLoader_Reload_RejectsWhenKeptConfigIsInvalid(t *testing.T) {
 	}
 	if l.Get() != before {
 		t.Error("config replaced although the kept config was invalid")
+	}
+}
+
+// TestMultiChainLoader_Reload_CircuitBreakerAndArchivalMinHeightAreLive:
+// circuit breakers are read per request and archival.min_height per archival
+// tick, so both apply without a restart.
+func TestMultiChainLoader_Reload_CircuitBreakerAndArchivalMinHeightAreLive(t *testing.T) {
+	t.Parallel()
+
+	path := writeTestConfig(t, startupBaseYAML)
+	l := newUnwatchedLoader(t, path)
+
+	changed := strings.Replace(startupBaseYAML, "min_height: 100", "min_height: 200", 1)
+	changed = strings.Replace(changed, "    mode: latest\n", "    mode: latest\n    circuit_breaker:\n      http_codes: [502, 503]\n      threshold: 7\n", 1)
+	rewriteConfig(t, path, changed)
+	if err := l.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	eq(t, findNetwork(l.Get(), "pocket").Archival.MinHeight, int64(200))
+	cb := findNetwork(l.Get(), "eth").CircuitBreaker
+	if cb == nil || cb.Threshold != 7 {
+		t.Errorf("eth circuit_breaker = %+v, want threshold 7", cb)
 	}
 }
