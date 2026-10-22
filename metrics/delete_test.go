@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -69,10 +70,10 @@ func TestDeleteNodeSeries(t *testing.T) {
 func TestDeleteExternalSeries(t *testing.T) {
 	ExternalRingAvailable.WithLabelValues("del-ext", "https://ring").Set(1)
 	ExternalEndpointsWorking.WithLabelValues("pocket", "rest", "del-ext").Set(2)
-	ExternalEndpointErrorCount.WithLabelValues("pocket", "rest", "https://del-ep").Set(3)
+	ExternalEndpointErrorCount.WithLabelValues("pocket", "rest", "del-ext").Set(3)
 	ExternalEndpointsWorking.WithLabelValues("pocket", "rest", "kept-ext").Set(1)
 
-	DeleteExternalSeries("del-ext", []string{"https://del-ep"})
+	DeleteExternalSeries("del-ext")
 
 	if n := seriesWith(t, ExternalRingAvailable, map[string]string{"ring_name": "del-ext"}); n != 0 {
 		t.Errorf("ring availability still exported (%d)", n)
@@ -80,10 +81,37 @@ func TestDeleteExternalSeries(t *testing.T) {
 	if n := seriesWith(t, ExternalEndpointsWorking, map[string]string{"ring_name": "del-ext"}); n != 0 {
 		t.Errorf("endpoints working still exported (%d)", n)
 	}
-	if n := seriesWith(t, ExternalEndpointErrorCount, map[string]string{"url": "https://del-ep"}); n != 0 {
+	if n := seriesWith(t, ExternalEndpointErrorCount, map[string]string{"ring_name": "del-ext"}); n != 0 {
 		t.Errorf("endpoint error count still exported (%d)", n)
 	}
 	if n := seriesWith(t, ExternalEndpointsWorking, map[string]string{"ring_name": "kept-ext"}); n != 1 {
 		t.Errorf("kept external lost its series (%d)", n)
+	}
+}
+
+// CLAUDE.md: no high-cardinality labels, no URLs. A "url" label held the URLs
+// external rings advertise: chosen by a remote party, so a broken or hostile
+// ring could grow the series without bound. (ring_url comes from our own config
+// and stays.) Every metric is checked, so a new url label fails here.
+func TestNoURLLabels(t *testing.T) {
+	// Give every vector a series so Gather reports its labels.
+	ExternalEndpointErrorCount.WithLabelValues("pocket", "rest", "label-check").Set(0)
+	ExternalEndpointProxyErrors.WithLabelValues("pocket", "rest", "label-check").Add(0)
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if !strings.HasPrefix(mf.GetName(), "sauron_") {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if strings.ToLower(l.GetName()) == "url" {
+					t.Errorf("%s has label %q: URLs are unbounded; use the node or external name", mf.GetName(), l.GetName())
+				}
+			}
+		}
 	}
 }

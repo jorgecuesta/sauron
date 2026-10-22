@@ -15,9 +15,9 @@ func recoveriesCount(network, epType, external string) float64 {
 	return m.GetCounter().GetValue()
 }
 
-func errorCountGauge(network, epType, url string) float64 {
+func errorCountGauge(network, epType, external string) float64 {
 	var m dto.Metric
-	_ = metrics.ExternalEndpointErrorCount.WithLabelValues(network, epType, url).Write(&m)
+	_ = metrics.ExternalEndpointErrorCount.WithLabelValues(network, epType, external).Write(&m)
 	return m.GetGauge().GetValue()
 }
 
@@ -64,7 +64,7 @@ func TestExternalEndpoints_ValidationFailureOfValidatedEndpointIsRecoverable(t *
 	if got.Height != 100 {
 		t.Errorf("Height = %d, want the last known 100", got.Height)
 	}
-	if g := errorCountGauge(net, typ, url); g != 2 {
+	if g := errorCountGauge(net, typ, ext); g != 2 {
 		t.Errorf("error count gauge = %v, want 2", g)
 	}
 	if len(s.GetValidatedEndpoints(net, typ)) != 0 {
@@ -79,7 +79,7 @@ func TestExternalEndpoints_ValidationFailureOfValidatedEndpointIsRecoverable(t *
 	if ep == nil || !ep.IsWorking || ep.ErrorCount != 0 || ep.Height != 120 {
 		t.Errorf("after recovery: %+v, want working, ErrorCount 0, height 120", ep)
 	}
-	if g := errorCountGauge(net, typ, url); g != 0 {
+	if g := errorCountGauge(net, typ, ext); g != 0 {
 		t.Errorf("error count gauge = %v after recovery, want 0", g)
 	}
 
@@ -148,5 +148,33 @@ func TestExternalEndpoints_EndpointsForRing(t *testing.T) {
 		if ep.URL == "mutated" || ep.IsWorking {
 			t.Errorf("store mutated through returned copy: %+v", ep)
 		}
+	}
+}
+
+// The error count gauge is labelled by external, not by advertised URL: with
+// two rings of one external advertising different URLs of the same type, it
+// shows the higher count, and drops when that endpoint recovers.
+func TestExternalEndpoints_ErrorCountGaugeIsHighestPerExternal(t *testing.T) {
+	t.Parallel()
+	s := newTestEndpointStore()
+	const ext, net, typ = "ext-max", "pocket-max", "rest"
+	s.StoreAdvertised(ext, "https://ring-1", net, typ, "https://a.example.com")
+	s.StoreAdvertised(ext, "https://ring-2", net, typ, "https://b.example.com")
+	s.MarkValidated(ext, "https://ring-1", net, typ, "https://a.example.com", 100, time.Millisecond)
+	s.MarkValidated(ext, "https://ring-2", net, typ, "https://b.example.com", 100, time.Millisecond)
+
+	s.MarkValidationFailed(ext, "https://ring-1", net, typ, "https://a.example.com")
+	s.MarkValidationFailed(ext, "https://ring-1", net, typ, "https://a.example.com")
+	s.MarkValidationFailed(ext, "https://ring-2", net, typ, "https://b.example.com")
+	if g := errorCountGauge(net, typ, ext); g != 2 {
+		t.Errorf("gauge = %v, want 2 (the higher of 2 and 1)", g)
+	}
+	s.MarkValidated(ext, "https://ring-1", net, typ, "https://a.example.com", 100, time.Millisecond)
+	if g := errorCountGauge(net, typ, ext); g != 1 {
+		t.Errorf("gauge after a recovered = %v, want 1 (b still failing)", g)
+	}
+	s.MarkValidated(ext, "https://ring-2", net, typ, "https://b.example.com", 100, time.Millisecond)
+	if g := errorCountGauge(net, typ, ext); g != 0 {
+		t.Errorf("gauge after both recovered = %v, want 0", g)
 	}
 }

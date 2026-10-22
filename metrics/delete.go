@@ -14,14 +14,12 @@ func DeleteNodeSeries(network, node string) {
 }
 
 // DeleteExternalSeries stops exporting the state gauges of a removed external
-// ring and of its endpoints (by URL). Counters are kept.
-func DeleteExternalSeries(externalName string, endpointURLs []string) {
+// and of its endpoints. Counters are kept.
+func DeleteExternalSeries(externalName string) {
 	ring := prometheus.Labels{"ring_name": externalName}
 	ExternalRingAvailable.DeletePartialMatch(ring)
 	ExternalEndpointsTracked.DeletePartialMatch(ring)
 	ExternalEndpointsValidated.DeletePartialMatch(ring)
 	ExternalEndpointsWorking.DeletePartialMatch(ring)
-	for _, url := range endpointURLs {
-		ExternalEndpointErrorCount.DeletePartialMatch(prometheus.Labels{"url": url})
-	}
+	ExternalEndpointErrorCount.DeletePartialMatch(ring)
 }

@@ -335,15 +335,15 @@ func (s *Server) reconcile(cfg *config.MultiChainConfig) {
 			rings[ext.Name+"\x00"+ring] = true
 		}
 	}
-	removedByExternal := make(map[string][]string)
+	removedByExternal := make(map[string]int)
 	for _, ep := range s.endpointStore.RemoveExternals(func(name, ring string) bool { return rings[name+"\x00"+ring] }) {
-		removedByExternal[ep.ExternalName] = append(removedByExternal[ep.ExternalName], ep.URL)
+		removedByExternal[ep.ExternalName]++
 	}
-	for name, urls := range removedByExternal {
-		metrics.DeleteExternalSeries(name, urls)
+	for name, n := range removedByExternal {
+		metrics.DeleteExternalSeries(name)
 		s.logger.Info("Forgot external endpoints removed from the config",
 			zap.String("external", name),
-			zap.Int("endpoints", len(urls)),
+			zap.Int("endpoints", n),
 		)
 	}
 

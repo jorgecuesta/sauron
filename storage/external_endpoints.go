@@ -153,7 +153,7 @@ func (s *ExternalEndpointStore) MarkValidated(externalName, ringURL, network, en
 	// Record metrics
 	metrics.ExternalEndpointValidationAttempts.WithLabelValues(network, endpointType, externalName, "success").Inc()
 	metrics.ExternalEndpointValidationLatency.WithLabelValues(network, endpointType, externalName).Observe(latency.Seconds())
-	metrics.ExternalEndpointErrorCount.WithLabelValues(network, endpointType, url).Set(0)
+	s.setErrorCountGauge(externalName, network, endpointType)
 }
 
 // MarkValidationFailed marks an endpoint validation as failed
@@ -174,7 +174,7 @@ func (s *ExternalEndpointStore) MarkValidationFailed(externalName, ringURL, netw
 	ep.LastError = time.Now()
 	if ep.IsValidated {
 		ep.ErrorCount++
-		metrics.ExternalEndpointErrorCount.WithLabelValues(network, endpointType, url).Set(float64(ep.ErrorCount))
+		s.setErrorCountGauge(externalName, network, endpointType)
 	}
 
 	s.logger.Warn("Endpoint validation failed",
@@ -256,8 +256,8 @@ func (s *ExternalEndpointStore) TrackProxyError(network, endpointType, url strin
 			}
 
 			// Record metrics
-			metrics.ExternalEndpointProxyErrors.WithLabelValues(network, endpointType, url).Inc()
-			metrics.ExternalEndpointErrorCount.WithLabelValues(network, endpointType, url).Set(float64(ep.ErrorCount))
+			metrics.ExternalEndpointProxyErrors.WithLabelValues(network, endpointType, ep.ExternalName).Inc()
+			s.setErrorCountGauge(ep.ExternalName, network, endpointType)
 
 			return true
 		}
@@ -286,6 +286,18 @@ func (s *ExternalEndpointStore) UpdateWebSocketAvailability(externalName, ringUR
 		zap.String("url", url),
 		zap.Bool("available", available),
 	)
+}
+
+// setErrorCountGauge publishes the highest error count among externalName's
+// endpoints of network and endpointType. Callers hold s.mu.
+func (s *ExternalEndpointStore) setErrorCountGauge(externalName, network, endpointType string) {
+	highest := 0
+	for _, ep := range s.endpoints {
+		if ep.ExternalName == externalName && ep.Network == network && ep.Type == endpointType && ep.ErrorCount > highest {
+			highest = ep.ErrorCount
+		}
+	}
+	metrics.ExternalEndpointErrorCount.WithLabelValues(network, endpointType, externalName).Set(float64(highest))
 }
 
 // UpdateAggregateMetrics updates aggregate endpoint count metrics
