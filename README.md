@@ -206,7 +206,7 @@ Edit the file (it is watched) or send `SIGHUP`. Nodes, externals, users, check i
 | Path | |
 |---|---|
 | `GET /health` | Liveness |
-| `GET /ready` | 200 once at least one internal node is configured (it does not check that a node is routable) |
+| `GET /ready` | 503 until the first round of checks has finished, then 200; it does not follow node health, so it stays 200 when every node is down |
 | `GET /{network}/status` | The network's height and advertised endpoints (what external rings read); behind `auth` and `rate_limit` when enabled |
 | `GET /metrics` | Prometheus metrics |
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,8 +157,9 @@ func (p *GRPCProxy) GetServer() *grpc.Server {
 // getOrCreateConnection gets a pooled connection or creates a new one (optimization)
 func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (*grpc.ClientConn, error) {
 	// Check if we have a cached connection
+	key := grpcutil.ConnKey(targetAddr, useInsecure)
 	p.connMu.RLock()
-	if conn, exists := p.connPool[targetAddr]; exists {
+	if conn, exists := p.connPool[key]; exists {
 		// Verify connection is still valid
 		if conn.GetState().String() != "SHUTDOWN" {
 			p.connMu.RUnlock()
@@ -171,7 +173,7 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 	defer p.connMu.Unlock()
 
 	// Double-check after acquiring write lock
-	if conn, exists := p.connPool[targetAddr]; exists {
+	if conn, exists := p.connPool[key]; exists {
 		if conn.GetState().String() != "SHUTDOWN" {
 			return conn, nil
 		}
@@ -182,7 +184,7 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 				zap.Error(err),
 			)
 		}
-		delete(p.connPool, targetAddr)
+		delete(p.connPool, key)
 	}
 
 	// Get network config for message size limits
@@ -221,7 +223,7 @@ func (p *GRPCProxy) getOrCreateConnection(targetAddr string, useInsecure bool) (
 		return nil, err
 	}
 
-	p.connPool[targetAddr] = conn
+	p.connPool[key] = conn
 	return conn, nil
 }
 
@@ -567,6 +569,12 @@ func (p *GRPCProxy) shouldUseInsecureForNode(nodeName string) bool {
 			return node.GRPCInsecure
 		}
 	}
+	// An external endpoint is dialed with the transport its validation used;
+	// TLS when none is recorded.
+	if url, ok := strings.CutPrefix(nodeName, "ext:"); ok && p.endpointStore != nil {
+		insecure, known := p.endpointStore.GRPCTransport(url)
+		return known && insecure
+	}
 	return false
 }
 
@@ -590,14 +598,15 @@ func (p *GRPCProxy) CloseConnectionsExcept(keep func(addr string) bool) int {
 	defer p.connMu.Unlock()
 
 	n := 0
-	for addr, conn := range p.connPool {
+	for key, conn := range p.connPool {
+		addr := grpcutil.ConnTarget(key)
 		if keep(addr) {
 			continue
 		}
 		if err := conn.Close(); err != nil {
 			p.logger.Warn("Failed to close gRPC connection", zap.String("addr", addr), zap.Error(err))
 		}
-		delete(p.connPool, addr)
+		delete(p.connPool, key)
 		n++
 	}
 	return n
@@ -608,8 +617,10 @@ func (p *GRPCProxy) PooledAddresses() []string {
 	p.connMu.RLock()
 	defer p.connMu.RUnlock()
 	addrs := make([]string, 0, len(p.connPool))
-	for addr := range p.connPool {
-		addrs = append(addrs, addr)
+	for key := range p.connPool {
+		if addr := grpcutil.ConnTarget(key); !slices.Contains(addrs, addr) {
+			addrs = append(addrs, addr)
+		}
 	}
 	return addrs
 }

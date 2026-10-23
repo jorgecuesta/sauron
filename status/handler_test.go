@@ -91,6 +91,8 @@ func TestReady_WithInternals(t *testing.T) {
 	}
 }
 
+// An externals-only config is valid and serves through the rings, so it is
+// ready like any other once its checks have run; before #29 it was never ready.
 func TestReady_NoInternals(t *testing.T) {
 	t.Parallel()
 	h, _ := buildHandler(t, false)
@@ -99,8 +101,8 @@ func TestReady_NoInternals(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.handleReady(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 with no internals, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for an externals-only config without a readiness gate, got %d", w.Code)
 	}
 }
 
@@ -173,5 +175,36 @@ func TestStatus_UnknownNetwork(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown network, got %d", w.Code)
+	}
+}
+
+// /ready follows the readiness the server wires in (the scheduler's first
+// round of checks), not whether internal nodes are configured (issue #29).
+func TestReady_FollowsReadiness(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		hasInternals bool
+		ready        func() bool
+		wantCode     int
+		wantBody     string
+	}{
+		{name: "checks not finished", hasInternals: true, ready: func() bool { return false }, wantCode: http.StatusServiceUnavailable, wantBody: "first health checks not finished"},
+		{name: "checks finished", hasInternals: true, ready: func() bool { return true }, wantCode: http.StatusOK, wantBody: "Ready"},
+		{name: "externals only, checks finished", hasInternals: false, ready: func() bool { return true }, wantCode: http.StatusOK, wantBody: "Ready"},
+		{name: "externals only, checks not finished", hasInternals: false, ready: func() bool { return false }, wantCode: http.StatusServiceUnavailable, wantBody: "first health checks not finished"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h, _ := buildHandler(t, tt.hasInternals)
+			h.SetReadiness(tt.ready)
+			w := httptest.NewRecorder()
+			h.handleReady(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+			if w.Code != tt.wantCode || !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Fatalf("got %d %q, want %d containing %q", w.Code, w.Body.String(), tt.wantCode, tt.wantBody)
+			}
+		})
 	}
 }

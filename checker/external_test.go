@@ -1143,8 +1143,8 @@ func TestExternalChecker_CloseConnectionsExcept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conn B: %v", err)
 	}
-	checker.grpcConnections.Store(lisA.Addr().String(), connA)
-	checker.grpcConnections.Store(lisB.Addr().String(), connB)
+	checker.grpcConnections.Store(grpcutil.ConnKey(lisA.Addr().String(), true), connA)
+	checker.grpcConnections.Store(grpcutil.ConnKey(lisB.Addr().String(), true), connB)
 
 	keepA := func(url string) bool { return url == lisA.Addr().String() }
 	if n := checker.CloseConnectionsExcept(keepA); n != 1 {
@@ -1156,10 +1156,10 @@ func TestExternalChecker_CloseConnectionsExcept(t *testing.T) {
 	if connA.GetState() == connectivity.Shutdown {
 		t.Error("kept connection closed")
 	}
-	if _, ok := checker.grpcConnections.Load(lisB.Addr().String()); ok {
+	if _, ok := checker.grpcConnections.Load(grpcutil.ConnKey(lisB.Addr().String(), true)); ok {
 		t.Error("dropped connection still cached")
 	}
-	if _, ok := checker.grpcConnections.Load(lisA.Addr().String()); !ok {
+	if _, ok := checker.grpcConnections.Load(grpcutil.ConnKey(lisA.Addr().String(), true)); !ok {
 		t.Error("kept connection no longer cached")
 	}
 }

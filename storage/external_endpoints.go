@@ -35,14 +35,18 @@ type ExternalEndpoint struct {
 type ExternalEndpointStore struct {
 	mu        sync.RWMutex
 	endpoints map[string]*ExternalEndpoint // key: "{externalName}:{ring}:{network}:{type}:{url}"
-	logger    *zap.Logger
+	// grpcTransports holds, per gRPC endpoint URL, the transport its last
+	// successful validation used: plaintext (true) or TLS (false).
+	grpcTransports map[string]bool
+	logger         *zap.Logger
 }
 
 // NewExternalEndpointStore creates a new external endpoint store
 func NewExternalEndpointStore(logger *zap.Logger) *ExternalEndpointStore {
 	return &ExternalEndpointStore{
-		endpoints: make(map[string]*ExternalEndpoint),
-		logger:    logger,
+		endpoints:      make(map[string]*ExternalEndpoint),
+		grpcTransports: make(map[string]bool),
+		logger:         logger,
 	}
 }
 
@@ -264,6 +268,27 @@ func (s *ExternalEndpointStore) TrackProxyError(network, endpointType, url strin
 	}
 
 	return false
+}
+
+// SetGRPCTransport records the transport a successful gRPC validation of the
+// endpoint used, so the proxy dials it the same way. The last validation of a
+// URL wins, whichever ring advertised it.
+func (s *ExternalEndpointStore) SetGRPCTransport(externalName, ringURL, network, endpointType, url string, insecure bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.endpoints[s.makeKey(externalName, ringURL, network, endpointType, url)]; ok {
+		s.grpcTransports[url] = insecure
+	}
+}
+
+// GRPCTransport returns the transport recorded for the gRPC endpoint at url
+// (insecure means plaintext), and whether one was recorded. The proxy calls it
+// per request, so it is a map lookup.
+func (s *ExternalEndpointStore) GRPCTransport(url string) (insecure, known bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	insecure, known = s.grpcTransports[url]
+	return insecure, known
 }
 
 // UpdateWebSocketAvailability updates the WebSocket availability status for an RPC endpoint

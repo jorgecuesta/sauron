@@ -379,6 +379,7 @@ func (s *Server) startStatusServer(cfg *config.MultiChainConfig) error {
 	mux := http.NewServeMux()
 
 	handler := status.NewHandler(s.selector, s.configLoader, s.logger)
+	handler.SetReadiness(s.scheduler.Ready)
 	handler.SetupRoutes(mux)
 	s.statusHandler = handler
 

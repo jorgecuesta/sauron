@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"sauron/internal/grpcutil"
 	"sauron/internal/testutil"
 	"sauron/selector"
 	"sauron/storage"
@@ -875,7 +876,7 @@ func TestGetOrCreateConnection_ClosesShutdownConnection(t *testing.T) {
 
 	// Seed the pool with the dead connection.
 	p.connMu.Lock()
-	p.connPool[addr] = deadConn
+	p.connPool[grpcutil.ConnKey(addr, true)] = deadConn
 	p.connMu.Unlock()
 
 	// Ask the proxy for a connection — it must detect SHUTDOWN and return a fresh one.
@@ -892,7 +893,7 @@ func TestGetOrCreateConnection_ClosesShutdownConnection(t *testing.T) {
 
 	// The pool must now hold the new connection, not the dead one.
 	p.connMu.RLock()
-	pooled := p.connPool[addr]
+	pooled := p.connPool[grpcutil.ConnKey(addr, true)]
 	p.connMu.RUnlock()
 
 	if pooled == deadConn {

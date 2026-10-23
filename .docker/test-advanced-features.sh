@@ -614,9 +614,9 @@ BODY=$(echo "$RESPONSE" | head -1)
 print_info "Ready endpoint returned: $HTTP_CODE with body: $BODY"
 
 if [ "$HTTP_CODE" = "200" ]; then
-    print_pass "/ready endpoint returns 200 (internal nodes configured)"
+    print_pass "/ready endpoint returns 200 (first checks finished)"
 elif [ "$HTTP_CODE" = "503" ]; then
-    print_fail "/ready endpoint returned 503 (no internal nodes - unexpected)"
+    print_fail "/ready endpoint returned 503 (first checks not finished - unexpected this late)"
 else
     print_fail "/ready endpoint returned unexpected status $HTTP_CODE"
 fi
