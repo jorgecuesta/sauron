@@ -40,6 +40,11 @@ func trackableBackendFailure(origin string, code codes.Code) bool {
 	return grpcutil.IsNodeFailure(code)
 }
 
+// grpcClassifyWait bounds how long a client-side end reported by the
+// server->client goroutine waits for the client->server goroutine to show the
+// proxy rejected the request itself.
+const grpcClassifyWait = 50 * time.Millisecond
+
 // callEnd is how one forwarding direction ended; err is nil on a clean end.
 type callEnd struct {
 	err    error
@@ -425,6 +430,19 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	select {
 	case end = <-s2cEnd:
 		// The backend finished (or the client went away): the call is over.
+		if end.origin == originClient {
+			// grpc-go also cancels the stream when this proxy rejects a request
+			// over its own receive limit, so a "client went away" here may be
+			// that rejection, reported by the other goroutine an instant later.
+			// That report wins: it is a limit operators must see.
+			select {
+			case c := <-c2sEnd:
+				if c.origin == originProxy {
+					end = c
+				}
+			case <-time.After(grpcClassifyWait):
+			}
+		}
 	case end = <-c2sEnd:
 		if end.err == nil {
 			// Client half-closed, or the backend ended mid-send: its status follows.
