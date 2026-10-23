@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"sauron/adapter"
+	"sauron/config"
 	"sauron/storage"
 
 	"go.uber.org/zap"
@@ -55,7 +56,20 @@ func (c *OracleChecker) AddConfig(cfg OracleConfig) {
 // Each oracle is queried and the highest height across all oracles
 // for a network is stored.
 func (c *OracleChecker) CheckAll(ctx context.Context, timeout time.Duration) {
+	c.CheckDue(ctx, timeout, func(string, time.Duration) bool { return true })
+}
+
+// CheckDue runs the oracle checks of each network for which due(network,
+// interval) reports that its sync check_interval has elapsed.
+func (c *OracleChecker) CheckDue(ctx context.Context, timeout time.Duration, due func(network string, interval time.Duration) bool) {
 	for _, cfg := range c.configs {
+		interval := cfg.Interval
+		if interval <= 0 {
+			interval = config.DefaultCheckInterval
+		}
+		if !due(cfg.Network, interval) {
+			continue
+		}
 		for _, oracle := range cfg.Oracles {
 			oracle := oracle
 			network := cfg.Network

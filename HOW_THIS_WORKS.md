@@ -139,8 +139,9 @@ external_failover_threshold: 2
 
 # Timeouts
 timeouts:
-  health_check: 5s  # Health check interval
+  health_check: 5s  # Timeout of each health check (how often: networks[].height_check.interval)
   proxy: 60s        # Proxy request timeout
+  websocket_idle: 90s  # Close a WebSocket after this long without backend bytes (default 90s)
 
 # Network proxies
 networks:

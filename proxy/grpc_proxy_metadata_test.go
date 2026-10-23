@@ -92,7 +92,7 @@ func startDirectBackend(t *testing.T, handler grpc.StreamHandler) *grpc.ClientCo
 	if err != nil {
 		t.Fatalf("direct backend listen: %v", err)
 	}
-	srv := grpc.NewServer(grpc.UnknownServiceHandler(handler))
+	srv := grpc.NewServer(grpc.UnknownServiceHandler(handler), grpc.ForceServerCodec(&rawCodec{}))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 

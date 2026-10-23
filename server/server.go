@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"sauron/adapter/solana"
 	"sauron/checker"
 	"sauron/config"
+	"sauron/metrics"
 	"sauron/proxy"
 	"sauron/selector"
 	"sauron/status"
@@ -51,7 +53,9 @@ type Server struct {
 	grpcServers    []*grpc.Server     // All gRPC proxy servers
 	grpcProxies    []*proxy.GRPCProxy // All gRPC proxy instances (for Close)
 	errCh          chan error         // Fatal errors from background goroutines
-	sigCh          chan os.Signal     // SIGHUP from New on; SIGTERM/SIGINT added by WaitForShutdown
+	stopping       chan struct{}      // closed when Shutdown starts
+	shutdownOnce   sync.Once
+	sigCh          chan os.Signal // SIGHUP from New on; SIGTERM/SIGINT added by WaitForShutdown
 }
 
 // New creates a new Sauron server
@@ -195,6 +199,7 @@ func New(configPath string) (*Server, error) {
 		oracleChecker:  oracleChecker,
 		circuitBreaker: cb,
 		errCh:          make(chan error, 10),
+		stopping:       make(chan struct{}),
 	}, nil
 }
 
@@ -204,7 +209,7 @@ func New(configPath string) (*Server, error) {
 func buildOracleConfig(network *config.MultiChainNetwork, registry *adapter.Registry) (checker.OracleConfig, error) {
 	oracleCfg := checker.OracleConfig{
 		Network:  network.Name,
-		Interval: network.Sync.CheckInterval,
+		Interval: network.Sync.Interval(),
 	}
 
 	adpt, err := registry.Get(network.Type)
@@ -275,12 +280,98 @@ func (s *Server) Start() error {
 		return err
 	}
 
+	// After the proxies exist: reconcile reads s.grpcProxies.
+	s.watchConfig()
+
 	s.logger.Info("Sauron is fully operational - The tower stands",
 		zap.String("status_listen", cfg.Listen),
 		zap.Int("networks", len(cfg.Networks)),
 	)
 
 	return nil
+}
+
+// watchConfig makes every applied reload drop the state of nodes and
+// externals the new config no longer has. A check already running when the
+// reload lands can still write a removed node back, so the reconciliation runs
+// again once the health-check timeout has passed and no such check can be left.
+func (s *Server) watchConfig() {
+	s.configLoader.OnReload(func(cfg *config.MultiChainConfig) {
+		if s.isStopping() {
+			return
+		}
+		s.reconcile(cfg)
+		time.AfterFunc(cfg.Timeouts.HealthCheck+time.Second, func() {
+			if !s.isStopping() {
+				s.reconcile(s.configLoader.Get())
+			}
+		})
+	})
+}
+
+// isStopping reports whether Shutdown has started.
+func (s *Server) isStopping() bool {
+	select {
+	case <-s.stopping:
+		return true
+	default:
+		return false
+	}
+}
+
+// reconcile drops what cfg no longer configures: removed internal nodes
+// (heights, health, archival status, breaker counts and their state metrics),
+// removed externals or rings (their endpoints and metrics), and pooled gRPC
+// connections to addresses nothing routes to any more (a removed node, or a
+// node whose gRPC URL changed). It is idempotent.
+func (s *Server) reconcile(cfg *config.MultiChainConfig) {
+	nodes := make(map[storage.NodeRef]bool, len(cfg.Internals))
+	grpcAddrs := make(map[string]bool)
+	for _, n := range cfg.Internals {
+		nodes[storage.NodeRef{Network: n.Network, Node: n.Name}] = true
+		if addr := n.Endpoints["grpc"]; addr != "" {
+			grpcAddrs[addr] = true
+		}
+	}
+	keepNode := func(network, node string) bool { return nodes[storage.NodeRef{Network: network, Node: node}] }
+
+	for _, ref := range s.store.RemoveNodes(keepNode) {
+		metrics.DeleteNodeSeries(ref.Network, ref.Node)
+		s.logger.Info("Forgot node removed from the config",
+			zap.String("network", ref.Network),
+			zap.String("node", ref.Node),
+		)
+	}
+	s.healthStore.RemoveNodes(keepNode)
+	if s.archivalStore != nil {
+		s.archivalStore.RemoveNodes(keepNode)
+	}
+	s.circuitBreaker.RemoveNodes(keepNode)
+
+	rings := make(map[string]bool)
+	for _, ext := range cfg.Externals {
+		for _, ring := range ext.Rings {
+			rings[ext.Name+"\x00"+ring] = true
+		}
+	}
+	removedByExternal := make(map[string]int)
+	for _, ep := range s.endpointStore.RemoveExternals(func(name, ring string) bool { return rings[name+"\x00"+ring] }) {
+		removedByExternal[ep.ExternalName]++
+	}
+	for name, n := range removedByExternal {
+		metrics.DeleteExternalSeries(name)
+		s.logger.Info("Forgot external endpoints removed from the config",
+			zap.String("external", name),
+			zap.Int("endpoints", n),
+		)
+	}
+
+	externalGRPC := s.endpointStore.URLs("grpc")
+	keepAddr := func(addr string) bool { return grpcAddrs[addr] || externalGRPC[addr] }
+	for _, p := range s.grpcProxies {
+		p.CloseConnectionsExcept(keepAddr)
+	}
+	s.scheduler.CloseExternalConnectionsExcept(func(url string) bool { return externalGRPC[url] })
 }
 
 // startStatusServer starts the status API server
@@ -415,8 +506,14 @@ func (s *Server) waitForSignals(sigCh <-chan os.Signal) {
 	}
 }
 
-// Shutdown performs graceful shutdown
+// Shutdown performs graceful shutdown. It is idempotent: later calls do nothing.
 func (s *Server) Shutdown() {
+	s.shutdownOnce.Do(s.shutdown)
+}
+
+// shutdown stops everything; Shutdown runs it once.
+func (s *Server) shutdown() {
+	close(s.stopping)
 	s.logger.Info("The Dark Tower falls... performing graceful shutdown")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

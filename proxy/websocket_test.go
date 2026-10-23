@@ -56,7 +56,7 @@ func TestProxyWebSocket_NonHijackableWriter(t *testing.T) {
 	req.Header.Set("Upgrade", "websocket")
 
 	rr := httptest.NewRecorder()
-	statusCode, err := ProxyWebSocket(rr, req, "http://127.0.0.1:8080", zap.NewNop())
+	statusCode, err := ProxyWebSocket(rr, req, "http://127.0.0.1:8080", zap.NewNop(), 0)
 
 	if err == nil {
 		t.Fatal("expected error for non-hijackable writer")
@@ -79,7 +79,7 @@ func TestProxyWebSocket_InvalidURL(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/ws", nil)
 	rr := httptest.NewRecorder()
-	_, err := ProxyWebSocket(rr, req, "://invalid", zap.NewNop())
+	_, err := ProxyWebSocket(rr, req, "://invalid", zap.NewNop(), 0)
 
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
@@ -104,7 +104,7 @@ func TestProxyWebSocket_BackendUnreachable(t *testing.T) {
 	resultCh := make(chan result, 1)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s, e := ProxyWebSocket(w, r, "http://127.0.0.1:1", zap.NewNop())
+		s, e := ProxyWebSocket(w, r, "http://127.0.0.1:1", zap.NewNop(), 0)
 		resultCh <- result{s, e}
 	})
 
@@ -172,7 +172,7 @@ func TestProxyWebSocket_HappyPath(t *testing.T) {
 
 	// Proxy server: proxies WebSocket to the echo server.
 	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s, e := ProxyWebSocket(w, r, echoServer.URL, zap.NewNop())
+		s, e := ProxyWebSocket(w, r, echoServer.URL, zap.NewNop(), 0)
 		resultCh <- result{s, e}
 	}))
 	defer proxyServer.Close()

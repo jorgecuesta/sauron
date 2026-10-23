@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,10 +16,14 @@ import (
 	"sauron/storage"
 
 	"github.com/alitto/pond/v2"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 // MultiChainScheduler coordinates periodic health and height checks using the adapter engine.
@@ -38,7 +43,30 @@ type MultiChainScheduler struct {
 	archivalStore *storage.ArchivalStore
 	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
-	timeout       atomic.Int64 // health-check timeout (ns); written by every cron job, so atomic
+	timeout       atomic.Int64                  // health-check timeout (ns); written by every cron job, so atomic
+	lastRun       *xsync.Map[string, time.Time] // when each periodic check last ran, by "kind:network"
+	inFlight      sync.Map                      // check key -> *atomic.Bool, set while that check runs
+}
+
+// goOnce runs fn on the pool unless the previous run of the check named key is
+// still going. With an interval shorter than a check's timeout, a slow node
+// would otherwise get overlapping checks that finish out of order.
+func (s *MultiChainScheduler) goOnce(key string, fn func()) {
+	v, _ := s.inFlight.LoadOrStore(key, new(atomic.Bool))
+	running := v.(*atomic.Bool)
+	if !running.CompareAndSwap(false, true) {
+		return
+	}
+	if err := s.pool.Go(func() {
+		defer running.Store(false)
+		fn()
+	}); err != nil {
+		running.Store(false)
+	}
+}
+
+func newLastRunMap() *xsync.Map[string, time.Time] {
+	return xsync.NewMap[string, time.Time]()
 }
 
 // NewMultiChainScheduler creates a scheduler with adapter-driven checks.
@@ -74,6 +102,7 @@ func NewMultiChainScheduler(
 		archivalStore: archivalStore,
 		configLoader:  configLoader,
 		logger:        logger,
+		lastRun:       newLastRunMap(),
 	}
 	s.timeout.Store(int64(5 * time.Second))
 	return s
@@ -84,18 +113,19 @@ func (s *MultiChainScheduler) checkTimeout() time.Duration {
 	return time.Duration(s.timeout.Load())
 }
 
-// Start begins scheduled checks. Each network gets its own height check
-// interval based on config; health checks and externals use fixed intervals.
+// Start begins scheduled checks. A one-second tick runs each network's
+// internal node, archival and oracle checks when their configured interval has
+// elapsed (read from the current config, so a reload applies at once); the
+// external ring checks and their recovery use fixed intervals.
 func (s *MultiChainScheduler) Start() error {
 	cfg := s.configLoader.Get()
 	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
 
-	// Schedule internal node checks every 30 seconds.
-	_, err := s.cron.AddFunc("*/30 * * * * *", func() {
-		s.checkInternalNodes()
+	_, err := s.cron.AddFunc("* * * * * *", func() {
+		s.tick(time.Now())
 	})
 	if err != nil {
-		return fmt.Errorf("multi-chain scheduler: failed to add internal check cron: %w", err)
+		return fmt.Errorf("multi-chain scheduler: failed to add check tick: %w", err)
 	}
 
 	// Schedule external ring checks every 10 seconds.
@@ -114,29 +144,12 @@ func (s *MultiChainScheduler) Start() error {
 		return fmt.Errorf("multi-chain scheduler: failed to add recovery cron: %w", err)
 	}
 
-	// Schedule oracle checks every 30 seconds if oracles are configured.
 	if s.oracleChecker != nil && len(s.oracleChecker.Networks()) > 0 {
-		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
-			defer cancel()
-			s.oracleChecker.CheckAll(ctx, s.checkTimeout())
-		})
-		if err != nil {
-			return fmt.Errorf("multi-chain scheduler: failed to add oracle check cron: %w", err)
-		}
 		s.logger.Info("Oracle checker scheduled",
 			zap.Strings("networks", s.oracleChecker.Networks()),
 		)
 	}
-
-	// Schedule archival checks every 30 seconds for networks with archival config.
 	if s.archivalStore != nil && s.hasArchivalNetworks() {
-		_, err = s.cron.AddFunc("*/30 * * * * *", func() {
-			s.checkArchivalStatus()
-		})
-		if err != nil {
-			return fmt.Errorf("multi-chain scheduler: failed to add archival check cron: %w", err)
-		}
 		s.logger.Info("Archival checker scheduled")
 	}
 
@@ -148,6 +161,12 @@ func (s *MultiChainScheduler) Start() error {
 	return nil
 }
 
+// CloseExternalConnectionsExcept closes the external checker's cached gRPC
+// connections whose URL keep rejects; see ExternalChecker.CloseConnectionsExcept.
+func (s *MultiChainScheduler) CloseExternalConnectionsExcept(keep func(url string) bool) int {
+	return s.extChecker.CloseConnectionsExcept(keep)
+}
+
 // Stop halts the scheduler and closes resources.
 func (s *MultiChainScheduler) Stop() {
 	s.logger.Info("Stopping multi-chain scheduler...")
@@ -157,14 +176,64 @@ func (s *MultiChainScheduler) Stop() {
 	s.logger.Info("Multi-chain scheduler stopped")
 }
 
+// due reports whether the check named key should run at now, given its
+// interval, and if so records now as its last run. It is atomic per key, so
+// overlapping ticks never both run a check; a clock that goes back never runs
+// one early.
+func (s *MultiChainScheduler) due(key string, interval time.Duration, now time.Time) bool {
+	ran := false
+	s.lastRun.Compute(key, func(last time.Time, loaded bool) (time.Time, xsync.ComputeOp) {
+		if loaded && now.Sub(last) < interval {
+			return last, xsync.CancelOp
+		}
+		ran = true
+		return now, xsync.UpdateOp
+	})
+	return ran
+}
+
+// tick runs every periodic check whose interval has elapsed at now.
+func (s *MultiChainScheduler) tick(now time.Time) {
+	cfg := s.configLoader.Get()
+	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
+
+	for i := range cfg.Networks {
+		network := &cfg.Networks[i]
+		if s.due("height:"+network.Name, network.HeightCheckInterval(), now) {
+			s.checkNetworkNodes(cfg, network.Name)
+		}
+		if s.archivalStore != nil && network.Archival != nil && s.due("archival:"+network.Name, network.Archival.Interval(), now) {
+			s.checkArchivalNetwork(cfg, network)
+		}
+	}
+
+	if s.oracleChecker != nil && len(s.oracleChecker.Networks()) > 0 {
+		_ = s.pool.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
+			defer cancel()
+			s.oracleChecker.CheckDue(ctx, s.checkTimeout(), func(network string, interval time.Duration) bool {
+				return s.due("oracle:"+network, interval, now)
+			})
+		})
+	}
+}
+
 // checkInternalNodes runs height and health checks for all internal nodes
 // using the adapter engine and V2 config types directly.
 func (s *MultiChainScheduler) checkInternalNodes() {
 	cfg := s.configLoader.Get()
 	s.timeout.Store(int64(cfg.Timeouts.HealthCheck))
+	s.checkNetworkNodes(cfg, "")
+}
 
+// checkNetworkNodes runs height and health checks for the internal nodes of
+// networkName, or of every network when it is empty.
+func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, networkName string) {
 	for _, node := range cfg.Internals {
 		node := node
+		if networkName != "" && node.Network != networkName {
+			continue
+		}
 
 		network := cfg.FindNetwork(node.Network)
 		if network == nil {
@@ -211,7 +280,7 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 
 		// Skip gRPC height checks — engine only handles HTTP.
 		if !checkCfg.IsGRPC {
-			_ = s.pool.Go(func() {
+			s.goOnce("height:"+node.Network+":"+node.Name, func() {
 				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
@@ -251,6 +320,11 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 			}
 
 			hcNodeURL := node.Endpoints[hc.Protocol]
+			if hcNodeURL == "" && hc.IsWebSocket {
+				// CometBFT serves WebSocket on the RPC port (/websocket), so a node
+				// without an explicit websocket endpoint is checked through its RPC URL.
+				hcNodeURL = node.Endpoints["rpc"]
+			}
 			if hcNodeURL == "" {
 				continue
 			}
@@ -258,7 +332,7 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 			if hc.IsGRPC {
 				s.scheduleGRPCHealthCheck(node, hcNodeURL, hc.Protocol)
 			} else if hc.IsWebSocket {
-				s.scheduleWebSocketHealthCheck(node, hcNodeURL, hc.Protocol)
+				s.scheduleWebSocketHealthCheck(node, hcNodeURL, hc.Protocol, checkCfg.Protocol)
 			} else {
 				s.scheduleHTTPHealthCheck(node, hcNodeURL, hc)
 			}
@@ -268,7 +342,7 @@ func (s *MultiChainScheduler) checkInternalNodes() {
 
 // scheduleHTTPHealthCheck runs an HTTP health check via the adapter engine.
 func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode, nodeURL string, hc adapter.HealthCheckConfig) {
-	_ = s.pool.Go(func() {
+	s.goOnce("health:"+node.Network+":"+node.Name+":"+hc.Protocol, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
@@ -286,10 +360,42 @@ func (s *MultiChainScheduler) scheduleHTTPHealthCheck(node config.MultiChainNode
 	})
 }
 
+// grpcHealthQueryMethod is the query the gRPC health check sends once the
+// transport is READY. Its request is empty and its answer is not decoded, so
+// it needs no proto types.
+const grpcHealthQueryMethod = "/cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
+
+// grpcHealthQuery marks the node by a real query: a READY transport says
+// nothing about whether the node answers. A node-failure status (the ones the
+// proxy's circuit breaker counts) or no answer within the check timeout is
+// unhealthy; any other answer, such as Unimplemented on a non-Cosmos chain,
+// proves the node serves.
+func (s *MultiChainScheduler) grpcHealthQuery(conn *grpc.ClientConn, node config.MultiChainNode, protocol string) {
+	// The query gets the whole check timeout of its own: reaching READY may
+	// have used most of the dial's, and that is no reason to call the node
+	// unhealthy.
+	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
+	defer cancel()
+	// The answer is not decoded: only whether and how the node answered
+	// matters, and a local decoding error must not count as a node failure.
+	req, resp := []byte{}, []byte{}
+	err := conn.Invoke(ctx, grpcHealthQueryMethod, &req, &resp, grpc.ForceCodec(grpcutil.BytesCodec{}))
+	code := status.Code(err)
+	if grpcutil.IsNodeFailure(code) || code == codes.DeadlineExceeded {
+		s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, "gRPC health query: "+err.Error())
+		s.logger.Debug("gRPC health check: query failed",
+			zap.String("node", node.Name),
+			zap.String("code", code.String()),
+		)
+		return
+	}
+	s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+}
+
 // scheduleGRPCHealthCheck verifies that a gRPC endpoint is reachable by
 // dialing and waiting for the connection to reach the READY state.
 func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode, grpcAddr string, protocol string) {
-	_ = s.pool.Go(func() {
+	s.goOnce("health:"+node.Network+":"+node.Name+":"+protocol, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
@@ -319,7 +425,7 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 		for {
 			state := conn.GetState()
 			if state == connectivity.Ready {
-				s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+				s.grpcHealthQuery(conn, node, protocol)
 				return
 			}
 			if state == connectivity.TransientFailure || state == connectivity.Shutdown {
@@ -347,8 +453,12 @@ func (s *MultiChainScheduler) scheduleGRPCHealthCheck(node config.MultiChainNode
 
 // scheduleWebSocketHealthCheck verifies that a WebSocket endpoint is reachable
 // using the existing CheckWebSocket function.
-func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL string, protocol string) {
-	_ = s.pool.Go(func() {
+//
+// The result is also recorded as WebSocketAvailable on the node's height-store
+// entry under heightProtocol: that entry is what the selector returns and what
+// the HTTP proxy checks before allowing a WebSocket upgrade.
+func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChainNode, wsURL, protocol, heightProtocol string) {
+	s.goOnce("health:"+node.Network+":"+node.Name+":"+protocol, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 		defer cancel()
 
@@ -361,10 +471,13 @@ func (s *MultiChainScheduler) scheduleWebSocketHealthCheck(node config.MultiChai
 		}
 
 		ok := CheckWebSocket(ctx, checkURL, s.logger)
+		s.heightStore.UpdateWebSocketAvailability(node.Network, node.Name, heightProtocol, ok)
 		if ok {
 			s.healthStore.SetHealthy(node.Network, node.Name, protocol)
+			metrics.NodeWebSocketAvailable.WithLabelValues(node.Network, node.Name, protocol).Set(1)
 		} else {
 			s.healthStore.SetUnhealthy(node.Network, node.Name, protocol, "websocket check failed")
+			metrics.NodeWebSocketAvailable.WithLabelValues(node.Network, node.Name, protocol).Set(0)
 		}
 	})
 }
@@ -443,55 +556,66 @@ func (s *MultiChainScheduler) hasArchivalNetworks() bool {
 func (s *MultiChainScheduler) checkArchivalStatus() {
 	cfg := s.configLoader.Get()
 
-	for _, network := range cfg.Networks {
-		if network.Archival == nil {
+	for i := range cfg.Networks {
+		if cfg.Networks[i].Archival != nil {
+			s.checkArchivalNetwork(cfg, &cfg.Networks[i])
+		}
+	}
+}
+
+// checkArchivalNetwork checks whether each internal node of network serves
+// its archival min_height.
+func (s *MultiChainScheduler) checkArchivalNetwork(cfg *config.MultiChainConfig, network *config.MultiChainNetwork) {
+	minHeight := network.Archival.MinHeight
+	checkCfg := s.buildArchivalCheckConfig(network, minHeight)
+	if checkCfg == nil {
+		return
+	}
+
+	for _, node := range cfg.Internals {
+		if node.Network != network.Name {
 			continue
 		}
 
-		minHeight := network.Archival.MinHeight
-		checkCfg := s.buildArchivalCheckConfig(&network, minHeight)
-		if checkCfg == nil {
+		// Get the node URL for the archival check protocol.
+		nodeURL := node.Endpoints[checkCfg.Protocol]
+		if nodeURL == "" {
 			continue
 		}
 
-		for _, node := range cfg.Internals {
-			if node.Network != network.Name {
-				continue
+		node := node
+		checkCfg := *checkCfg
+		_ = s.pool.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
+			defer cancel()
+
+			height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
+			isArchival := err == nil && height > 0
+			// Info only when the status changes; the same answer every
+			// check_interval is Debug.
+			logAt := s.logger.Debug
+			if prev := s.archivalStore.GetStatus(network.Name, node.Name); prev == nil || prev.IsArchival != isArchival {
+				logAt = s.logger.Info
 			}
-
-			// Get the node URL for the archival check protocol.
-			nodeURL := node.Endpoints[checkCfg.Protocol]
-			if nodeURL == "" {
-				continue
-			}
-
-			node := node
-			checkCfg := *checkCfg
-			_ = s.pool.Go(func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
-				defer cancel()
-
-				height, err := s.engine.CheckHeight(ctx, checkCfg, urlutil.NormalizeURL(nodeURL))
-				if err != nil || height <= 0 {
-					s.archivalStore.SetNotArchival(network.Name, node.Name)
-					s.logger.Info("Node is not archival",
-						zap.String("node", node.Name),
-						zap.String("network", network.Name),
-						zap.Int64("min_height", minHeight),
-						zap.Error(err),
-					)
-					return
-				}
-
-				s.archivalStore.SetArchival(network.Name, node.Name)
-				s.logger.Info("Node confirmed archival",
+			if !isArchival {
+				s.archivalStore.SetNotArchival(network.Name, node.Name)
+				logAt("Node is not archival",
 					zap.String("node", node.Name),
 					zap.String("network", network.Name),
 					zap.Int64("min_height", minHeight),
-					zap.Int64("returned_height", height),
+					zap.Error(err),
 				)
-			})
-		}
+				return
+			}
+
+			s.archivalStore.SetArchival(network.Name, node.Name)
+			logAt("Node confirmed archival",
+				zap.String("node", node.Name),
+				zap.String("network", network.Name),
+				zap.Int64("min_height", minHeight),
+				zap.Int64("returned_height", height),
+			)
+		})
 	}
 }
 

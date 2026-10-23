@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+
+	"sauron/internal/grpcutil"
 )
 
 // knownChainTypes lists the built-in adapter types.
@@ -91,6 +95,9 @@ func validateMultiChainTimeouts(t *Timeouts) error {
 	if t.Proxy < time.Second {
 		return fmt.Errorf("proxy timeout too short: %s (minimum 1s)", t.Proxy)
 	}
+	if t.WebSocketIdle != 0 && t.WebSocketIdle < time.Second {
+		return fmt.Errorf("websocket_idle timeout too short: %s (minimum 1s, or unset for the default %s)", t.WebSocketIdle, DefaultWebSocketIdle)
+	}
 	return nil
 }
 
@@ -173,6 +180,18 @@ func validateMultiChainNetwork(net *MultiChainNetwork, index int, names map[stri
 		}
 	}
 
+	// Check intervals: unset means DefaultCheckInterval; anything set must
+	// be at least 1s (the scheduler's tick).
+	if net.HeightCheck != nil && net.HeightCheck.Interval != 0 && net.HeightCheck.Interval < time.Second {
+		return fmt.Errorf("network %d (%s): height_check interval too short: %s (minimum 1s)", index, net.Name, net.HeightCheck.Interval)
+	}
+	if net.Archival != nil && net.Archival.CheckInterval != 0 && net.Archival.CheckInterval < time.Second {
+		return fmt.Errorf("network %d (%s): archival check_interval too short: %s (minimum 1s)", index, net.Name, net.Archival.CheckInterval)
+	}
+	if net.Sync != nil && net.Sync.CheckInterval != 0 && net.Sync.CheckInterval < time.Second {
+		return fmt.Errorf("network %d (%s): sync check_interval too short: %s (minimum 1s)", index, net.Name, net.Sync.CheckInterval)
+	}
+
 	// Sync oracle validation.
 	if net.Sync != nil {
 		if net.Sync.MaxDrift <= 0 {
@@ -195,6 +214,39 @@ func validateMultiChainNetwork(net *MultiChainNetwork, index int, names map[stri
 		}
 	}
 
+	if net.CircuitBreaker != nil {
+		if err := validateCircuitBreaker(net.CircuitBreaker); err != nil {
+			return fmt.Errorf("network %d (%s): circuit_breaker %w", index, net.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func validateCircuitBreaker(cb *CircuitBreakerConfig) error {
+	if cb.Threshold < 0 {
+		return fmt.Errorf("threshold cannot be negative: %d", cb.Threshold)
+	}
+	if cb.RetryAttempts < 0 {
+		return fmt.Errorf("retry_attempts cannot be negative: %d", cb.RetryAttempts)
+	}
+	if cb.RetryBackoff < 0 {
+		return fmt.Errorf("retry_backoff cannot be negative: %s", cb.RetryBackoff)
+	}
+	for _, code := range cb.HTTPCodes {
+		if code < 100 || code > 599 {
+			return fmt.Errorf("http_codes: %d is not an HTTP status code", code)
+		}
+	}
+	for _, name := range cb.GRPCCodes {
+		code, ok := grpcutil.ParseCode(name)
+		if !ok {
+			return fmt.Errorf("grpc_codes: unknown gRPC code %q", name)
+		}
+		if code == codes.OK {
+			return fmt.Errorf("grpc_codes: gRPC code %q cannot count as a failure", name)
+		}
+	}
 	return nil
 }
 

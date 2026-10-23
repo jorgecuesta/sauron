@@ -40,6 +40,7 @@ go test -race -count=3 ./...  # Flaky test check
 - stdlib `testing` only — no testify, gomock, or external frameworks
 - Temp YAML files + `zap.NewNop()` + in-memory stores for setup
 - `t.Helper()` for helpers, `t.Parallel()` where safe
+- An address nothing listens on is `127.0.0.1:1` (privileged, never bound). Never bind a port and close it, or close an `httptest.Server`, to get one: a parallel test reuses the port and the "dead" backend answers. For servers a test starts itself, listen on `127.0.0.1:0` and keep the listener
 - Tests exist in: `selector/`, `config/`, `storage/`, `status/`, `proxy/`, `checker/`, `internal/urlutil/`, `adapter/`, `internal/jsonpath/`
 
 ### Test Quality Requirements (NON-NEGOTIABLE)
@@ -124,6 +125,7 @@ external_failover_threshold: 2  # Blocks behind before using externals
 timeouts:
   health_check: 5s
   proxy: 60s
+  websocket_idle: 90s   # Close a WebSocket after this long without backend bytes
 
 rate_limit:
   enabled: true
@@ -205,7 +207,8 @@ Client → Proxy (HTTP/gRPC) → Selector → Best Node
 
 ### Health Check Cycle (cron-based via `robfig/cron`)
 
-- Every 30s: check all internal nodes (API path, RPC /status, gRPC ABCIQuery)
+- Every `height_check.interval` per network (default 30s, read each 1s tick): check its internal nodes (height from RPC `/abci_info`, the app-committed height; health: API path, RPC /status, gRPC: transport READY, then a real `GetLatestBlock` query; a node-failure status keeps the node out)
+- Every `archival.check_interval` / `sync.check_interval` per network (default 30s): archival status and sync oracles
 - Every 10s: query external Sauron rings for endpoint discovery
 - Every 10s: recover failed external endpoints
 

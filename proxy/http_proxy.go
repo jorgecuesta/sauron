@@ -37,6 +37,24 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
+// joinURLPath joins a and b's paths keeping their escaping (e.g. an encoded
+// slash, %2F), as httputil.NewSingleHostReverseProxy does: RawPath is joined
+// from the escaped forms whenever either side has one.
+func joinURLPath(a, b *url.URL) (path, rawpath string) {
+	if a.RawPath == "" && b.RawPath == "" {
+		return singleJoiningSlash(a.Path, b.Path), ""
+	}
+	apath, bpath := a.EscapedPath(), b.EscapedPath()
+	aslash, bslash := strings.HasSuffix(apath, "/"), strings.HasPrefix(bpath, "/")
+	switch {
+	case aslash && bslash:
+		return a.Path + b.Path[1:], apath + bpath[1:]
+	case !aslash && !bslash:
+		return a.Path + "/" + b.Path, apath + "/" + bpath
+	}
+	return a.Path + b.Path, apath + bpath
+}
+
 // HTTPProxy handles HTTP/API and RPC proxying with retry and circuit-breaking support.
 // The gates through which the Ringwraiths pass
 type HTTPProxy struct {
@@ -101,10 +119,20 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.Bool("websocket", IsWebSocketRequest(r)),
 	)
 
-	// Buffer request body for potential retry.
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize))
+	// Buffer request body for potential retry. A declared length over the
+	// limit is rejected without reading; otherwise read one byte past the
+	// limit so an oversized body is rejected, never forwarded truncated.
+	if r.ContentLength > maxRequestBodySize {
+		p.rejectBodyTooLarge(w, network)
+		return
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	if int64(len(bodyBytes)) > maxRequestBodySize {
+		p.rejectBodyTooLarge(w, network)
 		return
 	}
 
@@ -120,8 +148,13 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(cbCfg.RetryBackoff)
 		}
 
-		// Select best node for this attempt.
-		nodeMetrics, nodeName, decision := p.selector.GetBestNode(network, p.endpointType)
+		// Select best node for this attempt. A WebSocket upgrade only goes to
+		// a node whose WebSocket endpoint works.
+		selectNode := p.selector.GetBestNode
+		if IsWebSocketRequest(r) {
+			selectNode = p.selector.GetBestWebSocketNode
+		}
+		nodeMetrics, nodeName, decision := selectNode(network, p.endpointType)
 		if nodeMetrics == nil || nodeName == "" {
 			if attempt == 0 {
 				p.logger.Warn("No available nodes for routing",
@@ -164,7 +197,7 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Internal server error", http.StatusInternalServerError)
 				return
 			}
-			p.handleWebSocket(w, r, target, nodeName, network, start, decision, nodeMetrics)
+			p.handleWebSocket(w, r, target, nodeName, network, start, decision)
 			return
 		}
 
@@ -174,6 +207,17 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		statusCode, fwdErr := p.forwardRequest(w, r, targetURL, bodyBytes, nodeName, network, start, decision, cbCfg)
 
 		if fwdErr != nil {
+			if r.Context().Err() != nil {
+				// The client went away: not the node's fault, and nobody is left
+				// to receive a retry.
+				metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "0", "client_cancel").Inc()
+				p.logger.Debug("Client cancelled request",
+					zap.String("network", network),
+					zap.String("node", nodeName),
+					zap.Error(r.Context().Err()),
+				)
+				return
+			}
 			// Record circuit-breaker error for connection failures and retriable codes.
 			if p.circuitBreaker != nil && cbCfg != nil {
 				p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
@@ -228,10 +272,7 @@ func (p *HTTPProxy) forwardRequest(
 
 	// Build outgoing URL — replicate full httputil.NewSingleHostReverseProxy Director behavior.
 	outURL := *target
-	outURL.Path = singleJoiningSlash(target.Path, r.URL.Path)
-	if target.Path != "" && r.URL.RawPath != "" {
-		outURL.RawPath = singleJoiningSlash(target.RawPath, r.URL.RawPath)
-	}
+	outURL.Path, outURL.RawPath = joinURLPath(target, r.URL)
 	if target.RawQuery == "" || r.URL.RawQuery == "" {
 		outURL.RawQuery = target.RawQuery + r.URL.RawQuery
 	} else {
@@ -351,37 +392,29 @@ func isRetriableHTTPCode(code int, retriableCodes []int) bool {
 	return false
 }
 
+// rejectBodyTooLarge answers 413 for a body over maxRequestBodySize. No node
+// has been selected yet, so the node label is empty.
+func (p *HTTPProxy) rejectBodyTooLarge(w http.ResponseWriter, network string) {
+	metrics.ProxyErrors.WithLabelValues(network, "", p.endpointType, "413", "body_too_large").Inc()
+	http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+}
+
 // getCircuitBreakerConfig returns the CircuitBreakerConfig for this proxy's network.
 // Returns nil when unconfigured.
 func (p *HTTPProxy) getCircuitBreakerConfig() *config.CircuitBreakerConfig {
-	cfg := p.configLoader.Get()
-	net := cfg.FindNetwork(p.network)
-	if net == nil {
-		return nil
-	}
-	return net.CircuitBreaker
+	return networkCircuitBreakerConfig(p.configLoader, p.network)
 }
 
 // handleWebSocket handles WebSocket proxy requests.
 // Delegates the actual proxying to the shared ProxyWebSocket function,
 // then records metrics based on the outcome.
-func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision, nodeMetrics *storage.NodeMetrics) {
+func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL, nodeName, network string, start time.Time, decision *selector.SelectionDecision) {
 	p.logger.Debug("Handling WebSocket upgrade",
 		zap.String("node", nodeName),
 		zap.String("network", network),
 	)
 
-	if !nodeMetrics.WebSocketAvailable {
-		p.logger.Warn("Selected node does not support WebSocket",
-			zap.String("node", nodeName),
-			zap.String("network", network),
-		)
-		http.Error(w, "WebSocket not supported by selected backend", http.StatusServiceUnavailable)
-		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, "503", "websocket_not_supported").Inc()
-		return
-	}
-
-	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger)
+	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger, p.configLoader.Get().Timeouts.WebSocketIdleTimeout())
 	duration := time.Since(start)
 
 	statusStr := strconv.Itoa(statusCode)
@@ -403,9 +436,13 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 		metrics.ProxyErrors.WithLabelValues(network, nodeName, p.endpointType, statusStr, errCategory).Inc()
 
 		// Record circuit-breaker error for WebSocket backend failures; a client
-		// dropping its connection says nothing about the node.
+		// dropping its connection says nothing about the node, and a refused
+		// upgrade counts only for the configured codes, as on the HTTP path
+		// (a 400 answers a bad client handshake).
 		cbCfg := p.getCircuitBreakerConfig()
-		if p.circuitBreaker != nil && cbCfg != nil && errCategory != "client_disconnect" {
+		countsAgainstNode := errCategory != "client_disconnect" &&
+			(errCategory != "upgrade_rejected" || (cbCfg != nil && isRetriableHTTPCode(statusCode, cbCfg.HTTPCodes)))
+		if p.circuitBreaker != nil && cbCfg != nil && countsAgainstNode {
 			p.circuitBreaker.RecordError(network, nodeName, p.endpointType, cbCfg.Threshold)
 		}
 	} else {

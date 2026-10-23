@@ -11,6 +11,23 @@ import (
 type Timeouts struct {
 	HealthCheck time.Duration `mapstructure:"health_check"`
 	Proxy       time.Duration `mapstructure:"proxy"`
+	// WebSocketIdle closes a proxied WebSocket when the backend sends nothing
+	// for this long (0 means DefaultWebSocketIdle). It catches a hung backend
+	// that TCP keepalive cannot see. Read per connection, so a reload applies
+	// to new connections.
+	WebSocketIdle time.Duration `mapstructure:"websocket_idle"`
+}
+
+// DefaultWebSocketIdle is three CometBFT server ping periods (27s each), so a
+// healthy CometBFT subscription is never idle that long.
+const DefaultWebSocketIdle = 90 * time.Second
+
+// WebSocketIdleTimeout returns WebSocketIdle, or DefaultWebSocketIdle when unset.
+func (t Timeouts) WebSocketIdleTimeout() time.Duration {
+	if t.WebSocketIdle == 0 {
+		return DefaultWebSocketIdle
+	}
+	return t.WebSocketIdle
 }
 
 // GRPCKeepalive configures the gRPC client keepalive parameters.

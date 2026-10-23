@@ -1,0 +1,62 @@
+# Deterministic L3 environment: Sauron in front of two fake Cosmos nodes
+# (tools/fakenode). No external network needed, so it runs in CI on every PR.
+# Host ports are overridable; container names do not clash with docker-compose.yaml.
+name: sauron-fake
+
+services:
+  node-a:
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.fakenode
+    container_name: sauron-fake-node-a
+    environment:
+      FAKENODE_NAME: node-a
+      FAKENODE_START_HEIGHT: "5000"
+      FAKENODE_BLOCK_INTERVAL: 2s
+    ports:
+      - "${SAURON_FAKE_NODE_A_ADMIN_PORT:-38100}:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  node-b:
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile.fakenode
+    container_name: sauron-fake-node-b
+    environment:
+      FAKENODE_NAME: node-b
+      FAKENODE_START_HEIGHT: "5000"
+      FAKENODE_BLOCK_INTERVAL: 2s
+    ports:
+      - "${SAURON_FAKE_NODE_B_ADMIN_PORT:-38101}:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  sauron:
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+    container_name: sauron-fake-sauron
+    volumes:
+      - ./config-fake.yaml:/app/config.yaml:ro
+    ports:
+      - "${SAURON_FAKE_STATUS_PORT:-33000}:3000"
+      - "${SAURON_FAKE_REST_PORT:-38080}:8080"
+      - "${SAURON_FAKE_RPC_PORT:-38081}:8081"
+      - "${SAURON_FAKE_GRPC_PORT:-38082}:8082"
+    depends_on:
+      node-a:
+        condition: service_healthy
+      node-b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10

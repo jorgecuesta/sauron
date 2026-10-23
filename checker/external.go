@@ -73,6 +73,9 @@ func (c *ExternalChecker) CheckExternal(ctx context.Context, external config.Ext
 				zap.String("network", network),
 				zap.Error(err),
 			)
+			// The ring cannot vouch for its endpoints any more: check them
+			// directly instead of trusting their last result.
+			c.revalidateRingEndpoints(ctx, external.Name, ringURL, network)
 			continue // Try next ring
 		}
 	}
@@ -171,6 +174,18 @@ func (c *ExternalChecker) recordError(externalName, ringURL, errorType string, e
 		zap.String("error_type", errorType),
 		zap.Error(err),
 	)
+}
+
+// revalidateRingEndpoints validates again the working endpoints a ring that
+// no longer answers had advertised, keeping their last known height. Dead ones
+// become FAILED; failed ones are left to RecoverFailedEndpoints.
+func (c *ExternalChecker) revalidateRingEndpoints(ctx context.Context, externalName, ringURL, network string) {
+	for _, ep := range c.endpointStore.EndpointsForRing(externalName, ringURL, network) {
+		if !ep.IsValidated || !ep.IsWorking {
+			continue
+		}
+		c.validateEndpoint(ctx, externalName, ringURL, network, ep.Type, ep.URL, ep.Height)
+	}
 }
 
 // validateEndpoint performs a connectivity check on an advertised endpoint
@@ -397,7 +412,7 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 			continue
 		}
 
-		// Endpoint has recovered! Mark it as validated and working again
+		// Endpoint has recovered: MarkValidated records the recovery.
 		c.endpointStore.MarkValidated(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, ep.Height, latency)
 
 		// For RPC endpoints (Cosmos Tendermint), check WebSocket after recovery.
@@ -412,19 +427,25 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 				metrics.WebSocketCheckErrors.WithLabelValues(ep.Network, ep.ExternalName, ep.Type, "connectivity_failed").Inc()
 			}
 		}
-
-		// Record recovery metric
-		metrics.ExternalEndpointRecoveries.WithLabelValues(ep.Network, ep.Type, ep.ExternalName).Inc()
-
-		c.logger.Info("Failed endpoint has recovered",
-			zap.String("external", ep.ExternalName),
-			zap.String("ring", ep.RingURL),
-			zap.String("network", ep.Network),
-			zap.String("type", ep.Type),
-			zap.String("url", ep.URL),
-			zap.Duration("latency", latency),
-		)
 	}
+}
+
+// CloseConnectionsExcept closes and drops every cached gRPC connection whose
+// endpoint URL keep rejects (no longer advertised by a configured ring), and
+// returns how many it closed.
+func (c *ExternalChecker) CloseConnectionsExcept(keep func(url string) bool) int {
+	n := 0
+	c.grpcConnections.Range(func(url string, conn *grpc.ClientConn) bool {
+		if keep(url) {
+			return true
+		}
+		if _, loaded := c.grpcConnections.LoadAndDelete(url); loaded {
+			_ = conn.Close()
+			n++
+		}
+		return true
+	})
+	return n
 }
 
 // UpdateEndpointMetrics updates aggregate endpoint metrics

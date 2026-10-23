@@ -1,9 +1,12 @@
 #!/bin/bash
 
 # Host ports (override to run while something else holds the defaults).
+# Compose command (Compose v2 plugin by default; GitHub runners have no docker-compose v1).
+COMPOSE="${COMPOSE:-docker compose}"
 PRIMARY_STATUS_PORT="${SAURON_PRIMARY_STATUS_PORT:-3000}"
 SECONDARY_STATUS_PORT="${SAURON_SECONDARY_STATUS_PORT:-4000}"
 PRIMARY_API_PORT="${SAURON_PRIMARY_API_PORT:-8080}"
+PRIMARY_RPC_PORT="${SAURON_PRIMARY_RPC_PORT:-8081}"
 
 # Advanced Feature Testing Suite
 # Tests: Routing, Hot Reload, Redis Distribution, Health Recovery
@@ -43,13 +46,19 @@ print_info() {
     echo -e "${BLUE}ℹ INFO:${NC} $1"
 }
 
+# metric_sum <name> [label-regex]: sum of a primary metric's samples. Only
+# sample lines are read, never "# HELP"/"# TYPE", so an absent metric is 0.
+metric_sum() {
+    curl -s "http://localhost:${PRIMARY_STATUS_PORT}/metrics" | grep -E "^$1(\{| )" | grep -E "${2:-.}" | awk '{s+=$NF} END {print s+0}'
+}
+
 run_test() {
     ((TESTS_RUN++))
 }
 
 cleanup() {
     print_header "Cleaning Up"
-    docker-compose down -v 2>/dev/null || true
+    ${COMPOSE} down -v 2>/dev/null || true
     echo "Cleanup complete"
 }
 
@@ -72,8 +81,8 @@ echo ""
 # Start environment
 print_header "Setup: Starting Docker Compose Environment"
 print_info "Building and starting containers..."
-docker-compose build >/dev/null 2>&1
-docker-compose up -d 2>&1 | tail -5
+${COMPOSE} build >/dev/null 2>&1
+${COMPOSE} up -d 2>&1 | tail -5
 
 # Wait for healthy
 print_info "Waiting for containers to be healthy..."
@@ -135,14 +144,15 @@ RESPONSE=$(curl -s -H "Authorization: Bearer test-token-123" http://localhost:${
 print_info "Response: ${RESPONSE:0:100}"
 
 # Check if we got a valid response (not an error)
-if echo "$RESPONSE" | grep -qE '(height|block)'; then
-    print_pass "API proxy successfully routed request"
+RESP_HEIGHT=$(echo "$RESPONSE" | jq -r '.sdk_block.header.height // .block.header.height // empty' 2>/dev/null)
+if [ -n "$RESP_HEIGHT" ] && [ "$RESP_HEIGHT" -gt 0 ] 2>/dev/null; then
+    print_pass "API proxy routed the request (block height $RESP_HEIGHT)"
 else
     print_fail "API proxy did not route successfully"
 fi
 
 run_test
-print_test "Check routing metrics to see if external endpoints were selected"
+print_test "Selector recorded routing decisions for the routed request"
 
 # Look for selector metrics (correct metric name: sauron_routing_selections_total)
 SELECTIONS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_routing_selections_total' | head -5)
@@ -150,8 +160,8 @@ SELECTIONS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sau
 print_info "Node selection metrics:"
 echo "$SELECTIONS"
 
-if [ -n "$SELECTIONS" ]; then
-    print_pass "Selector is tracking node selections"
+if [ "$(metric_sum sauron_routing_selections_total)" -gt 0 ]; then
+    print_pass "Selector recorded $(metric_sum sauron_routing_selections_total) routing decisions"
 else
     print_fail "No selection metrics found"
 fi
@@ -167,6 +177,11 @@ print_test "Simulate endpoint failure by stopping secondary container"
 print_info "Stopping secondary container..."
 docker stop sauron-secondary >/dev/null 2>&1
 sleep 3
+if [ "$(docker inspect -f '{{.State.Running}}' sauron-secondary 2>/dev/null)" = "false" ]; then
+    print_pass "Secondary container stopped"
+else
+    print_fail "Secondary container is still running"
+fi
 
 run_test
 print_test "Verify primary detects the failure"
@@ -198,8 +213,15 @@ fi
 run_test
 print_test "Check if error count metrics increased"
 
-ERROR_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoint_error_count' | grep -v ' 0$' | wc -l)
-ERROR_COUNT=${ERROR_COUNT:-0}  # Default to 0 if empty
+# Wait until the secondary's endpoints are marked not working (3 consecutive
+# errors), so the recovery check below sees a real FAILED -> VALIDATED transition.
+ELAPSED=0
+while [ $ELAPSED -lt 120 ] && [ "$(metric_sum sauron_external_endpoints_working secondary-ring)" -gt 0 ]; do
+    sleep 5
+    ((ELAPSED+=5))
+done
+print_info "Working secondary endpoints after outage: $(metric_sum sauron_external_endpoints_working secondary-ring) (after ${ELAPSED}s)"
+ERROR_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep -E '^sauron_external_endpoint_error_count\{' | awk '$NF > 0' | wc -l)
 
 print_info "Endpoints with non-zero error count: $ERROR_COUNT"
 
@@ -243,26 +265,28 @@ fi
 run_test
 print_test "Verify primary detects recovery"
 
-# Poll for recovery instead of fixed sleep — gRPC validation can take longer
+# Poll for recovery instead of fixed sleep — gRPC validation can take longer.
+# Recovery means working again: a FAILED endpoint stays "validated" (so the
+# recovery loop re-checks it), so the validated gauge never drops in an outage.
 print_info "Polling for endpoint recovery (max 60s)..."
 TIMEOUT=60
 ELAPSED=0
-VALIDATED_AFTER=0
+WORKING_AFTER=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    VALIDATED_AFTER=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints_validated.*secondary-ring' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-    VALIDATED_AFTER=${VALIDATED_AFTER:-0}
-    if [ "$VALIDATED_AFTER" -ge 3 ]; then
+    WORKING_AFTER=$(metric_sum sauron_external_endpoints_working secondary-ring)
+    WORKING_AFTER=${WORKING_AFTER:-0}
+    if [ "$WORKING_AFTER" -ge 3 ]; then
         break
     fi
     sleep 5
     ((ELAPSED+=5))
 done
 
-if [ "$VALIDATED_AFTER" -ge 3 ]; then
-    print_pass "All 3 endpoint types recovered and re-validated after ${ELAPSED}s"
+if [ "$WORKING_AFTER" -ge 3 ]; then
+    print_pass "All 3 endpoint types recovered and working again after ${ELAPSED}s"
     docker logs sauron-primary 2>&1 | tail -30 | grep -i "recovered\|validated successfully" | tail -3
 else
-    print_fail "Not all endpoints recovered (validated: $VALIDATED_AFTER/3 after ${TIMEOUT}s)"
+    print_fail "Not all endpoints recovered (working: $WORKING_AFTER/3 after ${TIMEOUT}s)"
 fi
 
 run_test
@@ -279,11 +303,7 @@ print_info "Total recoveries: $RECOVERY_COUNT"
 if [ "$RECOVERY_COUNT" -gt 0 ]; then
     print_pass "Recovery metrics recorded ($RECOVERY_COUNT recoveries)"
 else
-    if [ "$VALIDATED_AFTER" -ge 3 ]; then
-        print_pass "Endpoints re-validated (fast restart prevented FAILED state, which is correct behavior)"
-    else
-        print_fail "Endpoints did not recover (validated: $VALIDATED_AFTER, expected: 3)"
-    fi
+    print_fail "No FAILED -> recovered transition recorded (recoveries: $RECOVERY_COUNT)"
 fi
 
 # =============================================================================
@@ -297,22 +317,19 @@ print_test "Modify primary configuration and send HUP signal"
 # Create a modified config with different listen port commented out
 # For safety, we'll just verify the reload mechanism works
 print_info "Sending SIGHUP to primary container..."
-docker exec sauron-primary pkill -HUP sauron 2>/dev/null || true
-sleep 2
+RESTARTS_BEFORE=$(docker inspect -f '{{.RestartCount}}' sauron-primary)
+docker exec sauron-primary pkill -HUP sauron
+sleep 3
+RESTARTS_AFTER=$(docker inspect -f '{{.RestartCount}}' sauron-primary)
+HUP_LOGS=$(docker logs sauron-primary 2>&1 | grep -c "SIGHUP received, reloading configuration")
+RELOAD_OK=$(metric_sum sauron_config_reload_ok)
 
-# Check if config was reloaded
-RELOAD_LOGS=$(docker logs sauron-primary 2>&1 | tail -20 | grep -i "reload\|reconfigur\|config.*load" | wc -l)
-RELOAD_LOGS=${RELOAD_LOGS:-0}  # Default to 0 if empty
+print_info "Restarts before/after: $RESTARTS_BEFORE/$RESTARTS_AFTER, SIGHUP log lines: $HUP_LOGS, sauron_config_reload_ok: $RELOAD_OK"
 
-print_info "Config reload log entries: $RELOAD_LOGS"
-
-if [ "$RELOAD_LOGS" -gt 0 ]; then
-    print_pass "Configuration reload triggered"
-    docker logs sauron-primary 2>&1 | tail -20 | grep -i "reload\|reconfigur\|config.*load" | tail -2
+if [ "$RESTARTS_AFTER" = "$RESTARTS_BEFORE" ] && [ "$HUP_LOGS" -gt 0 ] && [ "$RELOAD_OK" = "1" ]; then
+    print_pass "SIGHUP reloaded the configuration without restarting the process"
 else
-    print_info "No explicit reload logs (may reload silently)"
-    # This is okay - some apps reload without logging
-    print_pass "SIGHUP signal sent successfully"
+    print_fail "SIGHUP did not reload cleanly"
 fi
 
 run_test
@@ -379,8 +396,7 @@ if [ "$CACHED_KEYS" -gt 0 ]; then
     print_pass "Height data is being cached in Redis"
     docker exec sauron-redis redis-cli keys "height:*" 2>/dev/null | head -3
 else
-    print_info "No height data cached yet (cache may have short TTL)"
-    print_pass "Redis infrastructure functional"
+    print_fail "No height data cached in Redis"
 fi
 
 # =============================================================================
@@ -389,27 +405,24 @@ fi
 print_header "Test Suite 6: Selector Behavior with Internal + External"
 
 run_test
-print_test "Verify selector has both internal and external endpoints available"
+print_test "Internal nodes have heights and external endpoints are validated"
 
-# Check metrics for both internal and external selections
-INTERNAL_SELECTIONS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_routing_selections_total' | grep -v 'ext:' | wc -l)
-EXTERNAL_REFS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_external_endpoints' | wc -l)
-INTERNAL_SELECTIONS=${INTERNAL_SELECTIONS:-0}  # Default to 0 if empty
-EXTERNAL_REFS=${EXTERNAL_REFS:-0}  # Default to 0 if empty
+INTERNAL_HEIGHTS=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep -E '^sauron_node_height\{' | grep 'source="internal"' | awk '$NF > 0' | wc -l)
+EXTERNAL_VALIDATED=$(metric_sum sauron_external_endpoints_validated secondary-ring)
 
-print_info "Internal node metrics: $INTERNAL_SELECTIONS"
-print_info "External endpoint metrics: $EXTERNAL_REFS"
+print_info "Internal node height samples > 0: $INTERNAL_HEIGHTS"
+print_info "Validated external endpoints: $EXTERNAL_VALIDATED"
 
-if [ "$INTERNAL_SELECTIONS" -gt 0 ] && [ "$EXTERNAL_REFS" -gt 0 ]; then
-    print_pass "Selector has access to both internal and external endpoints"
+if [ "$INTERNAL_HEIGHTS" -gt 0 ] && [ "$EXTERNAL_VALIDATED" -ge 3 ]; then
+    print_pass "Selector has internal and external candidates"
 else
-    print_info "Selector metrics present (selections may not have occurred yet)"
-    print_pass "Endpoint tracking infrastructure functional"
+    print_fail "Missing internal heights or validated externals"
 fi
 
 run_test
 print_test "Send multiple requests to test load distribution"
 
+REQUESTS_BEFORE=$(metric_sum sauron_node_requests_total 'type="rest"')
 print_info "Sending 10 requests through primary..."
 for i in {1..10}; do
     curl -s -H "Authorization: Bearer test-token-123" http://localhost:${PRIMARY_API_PORT}/cosmos/base/tendermint/v1beta1/blocks/latest >/dev/null 2>&1 &
@@ -419,16 +432,36 @@ wait
 sleep 2
 
 # Check if requests were distributed
-REQUEST_COUNT=$(curl -s http://localhost:${PRIMARY_STATUS_PORT}/metrics | grep 'sauron_proxy_requests_total' | grep -oE '[0-9]+$' | awk '{sum+=$1} END {print sum}')
-REQUEST_COUNT=${REQUEST_COUNT:-0}  # Default to 0 if empty
+REQUEST_COUNT=$(( $(metric_sum sauron_node_requests_total 'type="rest"') - REQUESTS_BEFORE ))
 
 print_info "Total proxied requests: $REQUEST_COUNT"
 
 if [ "$REQUEST_COUNT" -ge 10 ]; then
     print_pass "Requests successfully routed through proxy"
 else
-    print_info "Proxied $REQUEST_COUNT requests (some may have failed)"
-    print_pass "Proxy is functional"
+    print_fail "Only $REQUEST_COUNT of 10 requests were proxied"
+fi
+
+run_test
+print_test "WebSocket upgrade through the primary RPC proxy (CometBFT /websocket)"
+
+# Relay miners subscribe to blocks over this path; 2.0.0-beta.2 rejected every
+# upgrade with 503. The first WebSocket health check runs on the 30s cron, so
+# retry for up to 60s before judging.
+WS_STATUS=""
+for i in $(seq 1 20); do
+    WS_STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 --http1.1 \
+        -H "Connection: Upgrade" -H "Upgrade: websocket" \
+        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+        "http://localhost:${PRIMARY_RPC_PORT}/websocket")
+    [ "$WS_STATUS" = "101" ] && break
+    sleep 3
+done
+
+if [ "$WS_STATUS" = "101" ]; then
+    print_pass "WebSocket upgrade accepted (HTTP 101)"
+else
+    print_fail "WebSocket upgrade not accepted (HTTP $WS_STATUS)"
 fi
 
 # =============================================================================
@@ -503,8 +536,7 @@ print_info "Total auth failures: $AUTH_FAILURES"
 if [ "$AUTH_FAILURES" -ge 3 ]; then
     print_pass "Auth failure metrics recorded ($AUTH_FAILURES failures)"
 else
-    print_info "Auth failures: $AUTH_FAILURES (expected >= 3)"
-    print_pass "Auth metrics functional"
+    print_fail "Auth failures not recorded: $AUTH_FAILURES (expected >= 3 after three 401s)"
 fi
 
 # =============================================================================
@@ -523,8 +555,7 @@ print_info "Rate limiting enabled in config: $RL_ENABLED"
 if [ "$RL_ENABLED" -gt 0 ]; then
     print_pass "Rate limiting is enabled"
 else
-    print_info "Rate limiting not enabled in config"
-    print_pass "Rate limiting test skipped"
+    print_fail "Rate limiting is not enabled in the primary config; the burst test below would prove nothing"
 fi
 
 run_test
@@ -552,9 +583,6 @@ THROTTLED=${THROTTLED:-0}  # Default to 0 if empty
 
 if [ "$THROTTLED" -gt 0 ]; then
     print_pass "Rate limiting working (throttled $THROTTLED requests)"
-elif [ "$SUCCESS" -ge 20 ]; then
-    print_info "All requests succeeded (burst capacity may have absorbed all)"
-    print_pass "Rate limiter functional (no throttling needed within burst)"
 else
     print_fail "Unexpected behavior: $SUCCESS successful, $THROTTLED throttled"
 fi
@@ -626,15 +654,19 @@ TRANSITIONS=${TRANSITIONS:-0}  # Default to 0 if empty
 
 print_info "State transition events in logs: $TRANSITIONS"
 
-if [ "$TRANSITIONS" -gt 5 ]; then
+ADVERTISED_LOG=$(docker logs sauron-primary 2>&1 | grep -c "Stored new advertised endpoint")
+VALIDATED_LOG=$(docker logs sauron-primary 2>&1 | grep -c "Endpoint validated successfully")
+FAILED_LOG=$(docker logs sauron-primary 2>&1 | grep -cE "marked as not working|Endpoint validation failed")
+print_info "advertised=$ADVERTISED_LOG validated=$VALIDATED_LOG failed=$FAILED_LOG recoveries=$(metric_sum sauron_external_endpoint_recoveries_total)"
+
+if [ "$ADVERTISED_LOG" -gt 0 ] && [ "$VALIDATED_LOG" -gt 0 ] && [ "$FAILED_LOG" -gt 0 ] && [ "$(metric_sum sauron_external_endpoint_recoveries_total)" -gt 0 ]; then
     print_pass "Multiple state transitions observed"
     echo ""
     echo "Sample state transitions:"
     docker logs sauron-primary 2>&1 | grep -E "Stored new|validated|failed|recovered" | head -5
     echo ""
 else
-    print_info "Limited state transitions observed ($TRANSITIONS events)"
-    print_pass "Basic state tracking functional"
+    print_fail "Not every state (advertised, validated, failed, recovered) was observed"
 fi
 
 # =============================================================================

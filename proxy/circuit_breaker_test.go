@@ -166,3 +166,29 @@ func TestIsRetriableHTTPCode(t *testing.T) {
 		}
 	}
 }
+
+// #20: a node removed from the config loses its breaker count, so a node
+// later added under the same name starts clean.
+func TestCircuitBreaker_RemoveNodes(t *testing.T) {
+	t.Parallel()
+	hs := storage.NewHealthStore()
+	cb := NewCircuitBreaker(hs, zap.NewNop())
+	cb.RecordError("pocket", "gone", "rest", 10)
+	cb.RecordError("pocket", "gone", "grpc", 10)
+	cb.RecordError("pocket", "kept", "rest", 10)
+	cb.RecordError("beta", "gone", "rest", 10)
+
+	if n := cb.RemoveNodes(func(network, node string) bool { return network != "pocket" || node != "gone" }); n != 2 {
+		t.Errorf("removed %d counters, want 2", n)
+	}
+	if cb.GetErrorCount("pocket", "gone", "rest") != 0 || cb.GetErrorCount("pocket", "gone", "grpc") != 0 {
+		t.Error("removed node keeps its error count")
+	}
+	if cb.GetErrorCount("pocket", "kept", "rest") != 1 || cb.GetErrorCount("beta", "gone", "rest") != 1 {
+		t.Error("kept counters changed")
+	}
+	var nilCB *CircuitBreaker
+	if n := nilCB.RemoveNodes(func(string, string) bool { return false }); n != 0 {
+		t.Errorf("nil breaker removed %d", n)
+	}
+}

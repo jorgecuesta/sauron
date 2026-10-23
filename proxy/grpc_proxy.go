@@ -18,7 +18,6 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -38,12 +37,13 @@ func trackableBackendFailure(origin string, code codes.Code) bool {
 	if origin == originClient {
 		return false
 	}
-	switch code {
-	case codes.Internal, codes.Unavailable, codes.DataLoss, codes.Unknown:
-		return true
-	}
-	return false
+	return grpcutil.IsNodeFailure(code)
 }
+
+// grpcClassifyWait bounds how long a client-side end reported by the
+// server->client goroutine waits for the client->server goroutine to show the
+// proxy rejected the request itself.
+const grpcClassifyWait = 50 * time.Millisecond
 
 // callEnd is how one forwarding direction ended; err is nil on a clean end.
 type callEnd struct {
@@ -75,12 +75,13 @@ func (c *rawCodec) Unmarshal(data []byte, v interface{}) error {
 	return fmt.Errorf("invalid type for raw codec: %T", v)
 }
 
+// Name is "proto" because grpc-go puts the codec name on the wire as the
+// content-subtype, and the frames are protobuf bytes passed through unchanged:
+// nodes and clients see a standard application/grpc+proto call. The codec is
+// only installed per connection (ForceCodec / ForceServerCodec), never
+// registered globally, so it cannot replace the real proto codec.
 func (c *rawCodec) Name() string {
-	return "raw"
-}
-
-func init() {
-	encoding.RegisterCodec(&rawCodec{})
+	return "proto"
 }
 
 // GRPCProxy handles gRPC proxying with transparent request forwarding
@@ -295,12 +296,33 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 		ClientStreams: true,
 	}, method)
 	if err != nil {
+		if clientErr := stream.Context().Err(); clientErr != nil {
+			// The client left while the backend stream was being opened: not
+			// the endpoint's fault. Recorded like any other finished call.
+			clientStatus := status.FromContextError(clientErr)
+			statusStr := strconv.Itoa(int(clientStatus.Code()))
+			metrics.ProxyRequestDuration.WithLabelValues(p.network, nodeName, "grpc", statusStr).Observe(time.Since(start).Seconds())
+			metrics.NodeRequests.WithLabelValues(p.network, nodeName, "grpc", normalizeGRPCMethod(method)).Inc()
+			metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", statusStr, originClient).Inc()
+			p.logger.Debug("Client cancelled during gRPC stream setup",
+				zap.String("method", method),
+				zap.Error(clientErr),
+			)
+			return clientStatus.Err()
+		}
 		p.logger.Error("Failed to create client stream",
 			zap.String("method", method),
 			zap.Error(err),
 		)
 		metrics.ProxyErrors.WithLabelValues(p.network, nodeName, "grpc", "unavailable", "stream_error").Inc()
-		return status.Errorf(codes.Internal, "failed to create stream: %v", err)
+		p.recordBreakerError(nodeName)
+		// The backend cannot be reached: that is Unavailable (clients retry on
+		// it), not Internal, and it counts against the endpoint like any other
+		// backend failure. Dial details stay in the log.
+		if p.endpointStore != nil {
+			p.endpointStore.TrackProxyError(p.network, "grpc", targetAddr)
+		}
+		return status.Error(codes.Unavailable, "backend unavailable")
 	}
 
 	p.logger.Debug("Proxying gRPC to backend",
@@ -408,6 +430,19 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	select {
 	case end = <-s2cEnd:
 		// The backend finished (or the client went away): the call is over.
+		if end.origin == originClient {
+			// grpc-go also cancels the stream when this proxy rejects a request
+			// over its own receive limit, so a "client went away" here may be
+			// that rejection, reported by the other goroutine an instant later.
+			// That report wins: it is a limit operators must see.
+			select {
+			case c := <-c2sEnd:
+				if c.origin == originProxy {
+					end = c
+				}
+			case <-time.After(grpcClassifyWait):
+			}
+		}
 	case end = <-c2sEnd:
 		if end.err == nil {
 			// Client half-closed, or the backend ended mid-send: its status follows.
@@ -472,7 +507,11 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 				}
 			}
 		}
+		if end.origin != originClient {
+			p.recordBreakerOutcome(nodeName, grpcStatus)
+		}
 	} else {
+		p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
 		p.logger.Debug("gRPC request completed",
 			zap.String("method", method),
 			zap.Duration("duration", duration),
@@ -488,6 +527,35 @@ func (p *GRPCProxy) proxyHandler(srv interface{}, stream grpc.ServerStream) erro
 	)
 
 	return proxyErr
+}
+
+// recordBreakerError counts a backend failure of nodeName against the
+// circuit breaker, when the proxy has one and the network configures it.
+func (p *GRPCProxy) recordBreakerError(nodeName string) {
+	if p.circuitBreaker == nil {
+		return
+	}
+	if cbCfg := networkCircuitBreakerConfig(p.configLoader, p.network); cbCfg != nil {
+		p.circuitBreaker.RecordError(p.network, nodeName, "grpc", cbCfg.Threshold)
+	}
+}
+
+// recordBreakerOutcome records a call the node answered with code: an error
+// when the network's grpc_codes (or the default failure set) lists it, else a
+// success, since the node answered (e.g. NotFound for a bad query).
+func (p *GRPCProxy) recordBreakerOutcome(nodeName string, code codes.Code) {
+	if p.circuitBreaker == nil {
+		return
+	}
+	cbCfg := networkCircuitBreakerConfig(p.configLoader, p.network)
+	if cbCfg == nil {
+		return
+	}
+	if grpcutil.IsBreakerFailure(cbCfg.GRPCCodes, code) {
+		p.circuitBreaker.RecordError(p.network, nodeName, "grpc", cbCfg.Threshold)
+		return
+	}
+	p.circuitBreaker.RecordSuccess(p.network, nodeName, "grpc")
 }
 
 // shouldUseInsecureForNode determines if we should use insecure connection for a specific node
@@ -512,6 +580,38 @@ func normalizeGRPCMethod(method string) string {
 		return s[:idx]
 	}
 	return s
+}
+
+// CloseConnectionsExcept closes and drops every pooled backend connection
+// whose address keep rejects (a node removed or moved to another URL), and
+// returns how many it closed. Streams still open on such a connection fail.
+func (p *GRPCProxy) CloseConnectionsExcept(keep func(addr string) bool) int {
+	p.connMu.Lock()
+	defer p.connMu.Unlock()
+
+	n := 0
+	for addr, conn := range p.connPool {
+		if keep(addr) {
+			continue
+		}
+		if err := conn.Close(); err != nil {
+			p.logger.Warn("Failed to close gRPC connection", zap.String("addr", addr), zap.Error(err))
+		}
+		delete(p.connPool, addr)
+		n++
+	}
+	return n
+}
+
+// PooledAddresses returns the backend addresses with a pooled connection.
+func (p *GRPCProxy) PooledAddresses() []string {
+	p.connMu.RLock()
+	defer p.connMu.RUnlock()
+	addrs := make([]string, 0, len(p.connPool))
+	for addr := range p.connPool {
+		addrs = append(addrs, addr)
+	}
+	return addrs
 }
 
 // Close closes all pooled connections. It is idempotent; subsequent calls are no-ops.

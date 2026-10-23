@@ -248,16 +248,18 @@ var (
 			Name: "sauron_external_endpoint_proxy_errors_total",
 			Help: "Total number of 5xx proxy errors from external endpoints",
 		},
-		[]string{"network", "type", "url"},
+		[]string{"network", "type", "ring_name"},
 	)
 
-	// ExternalEndpointErrorCount tracks current error count per endpoint
+	// ExternalEndpointErrorCount tracks the highest current error count among an
+	// external's endpoints of one network and type (labelled by external name,
+	// not by the advertised URL, which a remote ring chooses).
 	ExternalEndpointErrorCount = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sauron_external_endpoint_error_count",
-			Help: "Current consecutive error count for external endpoint",
+			Help: "Highest consecutive error count among an external's endpoints",
 		},
-		[]string{"network", "type", "url"},
+		[]string{"network", "type", "ring_name"},
 	)
 
 	// ExternalEndpointRecoveries tracks successful recoveries from failed state

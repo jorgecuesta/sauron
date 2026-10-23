@@ -22,6 +22,7 @@ var configFieldClass = map[string]string{
 	"auth":                                 "startup",
 	"timeouts.health_check":                "live",
 	"timeouts.proxy":                       "startup",
+	"timeouts.websocket_idle":              "live", // read per WebSocket connection in handleWebSocket
 	"grpc_keepalive.time":                  "startup",
 	"grpc_keepalive.timeout":               "startup",
 	"grpc_keepalive.permit_without_stream": "startup",
@@ -37,7 +38,7 @@ var configFieldClass = map[string]string{
 	"networks[].type":                               "startup",
 	"networks[].mode":                               "startup",
 	"networks[].height_check.protocol":              "startup",
-	"networks[].height_check.interval":              "live", // unused: the height cron is fixed at 30s
+	"networks[].height_check.interval":              "live", // read every scheduler tick
 	"networks[].height_check.method":                "startup",
 	"networks[].height_check.url_path":              "startup",
 	"networks[].height_check.headers":               "startup",
@@ -50,7 +51,7 @@ var configFieldClass = map[string]string{
 	"networks[].endpoints[].grpc_max_recv_msg_size": "startup",
 	"networks[].endpoints[].grpc_max_send_msg_size": "startup",
 	"networks[].archival.min_height":                "live",
-	"networks[].archival.check_interval":            "live", // unused: the archival cron is fixed at 30s
+	"networks[].archival.check_interval":            "live", // read every scheduler tick
 	"networks[].sync.max_drift":                     "startup",
 	"networks[].sync.check_interval":                "startup",
 	"networks[].sync.oracles[].url":                 "startup",
@@ -61,7 +62,7 @@ var configFieldClass = map[string]string{
 	"networks[].sync.oracles[].response_path":       "startup",
 	"networks[].sync.oracles[].response_format":     "startup",
 	"networks[].circuit_breaker.http_codes":         "live",
-	"networks[].circuit_breaker.grpc_codes":         "live", // unused: the gRPC proxy has no breaker
+	"networks[].circuit_breaker.grpc_codes":         "live", // read per gRPC call by GRPCProxy.recordBreakerOutcome
 	"networks[].circuit_breaker.threshold":          "live",
 	"networks[].circuit_breaker.retry_attempts":     "live",
 	"networks[].circuit_breaker.retry_backoff":      "live",

@@ -1,4 +1,4 @@
-.PHONY: build fmt fmt-check lint test ci clean docker-test docker-test-advanced docker-up docker-down help
+.PHONY: build fmt fmt-check lint test ci mutation clean docker-test docker-test-advanced docker-test-protocols docker-up docker-down help
 
 # Variables
 BINARY_NAME=sauron
@@ -12,6 +12,11 @@ GOLANGCI_LINT_VERSION ?= v2.14.0
 GOIMPORTS_VERSION ?= v0.51.0
 GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 GOIMPORTS = $(GO) run golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+GREMLINS_VERSION ?= v0.6.0
+GREMLINS = $(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@$(GREMLINS_VERSION)
+# Packages mutation-tested by `make mutation`, and where the JSON reports go.
+MUTATION_PKGS ?= proxy selector checker storage status config adapter internal/jsonpath server
+MUTATION_DIR ?= .local/mutation
 # Every Go file in the tree, tracked or not, so local results match CI.
 GO_FILES = $$(find . -name '*.go' -not -path './.git/*' -not -path './.claude/*')
 
@@ -48,6 +53,15 @@ test:
 ## ci: Run every check CI runs (tests, lint, format)
 ci: test lint fmt-check
 
+## mutation: Mutation-test MUTATION_PKGS with gremlins (pinned); JSON reports in MUTATION_DIR
+mutation:
+	@mkdir -p $(MUTATION_DIR)
+	@for p in $(MUTATION_PKGS); do \
+		echo "==> mutation testing ./$$p"; \
+		$(GREMLINS) unleash --timeout-coefficient 10 --workers 2 \
+			--output $(MUTATION_DIR)/$$(echo $$p | tr / _).json ./$$p || exit 1; \
+	done
+
 ## clean: Remove built binaries
 clean:
 	@echo "Cleaning..."
@@ -58,12 +72,12 @@ clean:
 ## docker-up: Start Docker Compose environment
 docker-up:
 	@echo "Starting Docker environment..."
-	cd $(DOCKER_DIR) && docker-compose up -d
+	cd $(DOCKER_DIR) && docker compose up -d
 
 ## docker-down: Stop Docker Compose environment
 docker-down:
 	@echo "Stopping Docker environment..."
-	cd $(DOCKER_DIR) && docker-compose down -v
+	cd $(DOCKER_DIR) && docker compose down -v
 
 ## docker-test: Run external validation tests
 docker-test:
@@ -74,6 +88,11 @@ docker-test:
 docker-test-advanced:
 	@echo "Running advanced feature tests..."
 	cd $(DOCKER_DIR) && ./test-advanced-features.sh
+
+## docker-test-protocols: Deterministic L3 suite against fake nodes (no network; runs in CI)
+docker-test-protocols:
+	@echo "Running protocol and failover tests against fake nodes..."
+	cd $(DOCKER_DIR) && ./test-protocols.sh
 
 ## help: Show this help message
 help:

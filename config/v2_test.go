@@ -182,6 +182,16 @@ func TestValidateMultiChain_Errors(t *testing.T) {
 			modify: func(c *MultiChainConfig) { c.Timeouts.Proxy = 100 * time.Millisecond },
 			errMsg: "proxy timeout too short",
 		},
+		{
+			name:   "short websocket_idle timeout",
+			modify: func(c *MultiChainConfig) { c.Timeouts.WebSocketIdle = 500 * time.Millisecond },
+			errMsg: "websocket_idle timeout too short",
+		},
+		{
+			name:   "negative websocket_idle timeout",
+			modify: func(c *MultiChainConfig) { c.Timeouts.WebSocketIdle = -time.Second },
+			errMsg: "websocket_idle timeout too short",
+		},
 
 		// Redis.
 		{
@@ -633,6 +643,38 @@ func TestMultiChainNetwork_FindEndpoint(t *testing.T) {
 
 	if net.FindEndpoint("grpc") != nil {
 		t.Fatal("expected nil for missing protocol")
+	}
+}
+
+func TestTimeouts_WebSocketIdle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		idle      time.Duration
+		want      time.Duration
+		wantValid bool
+	}{
+		{name: "unset uses the default", idle: 0, want: DefaultWebSocketIdle, wantValid: true},
+		{name: "minimum 1s", idle: time.Second, want: time.Second, wantValid: true},
+		{name: "custom", idle: 5 * time.Minute, want: 5 * time.Minute, wantValid: true},
+		{name: "below minimum", idle: 999 * time.Millisecond, want: 999 * time.Millisecond, wantValid: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validMultiChainConfig()
+			cfg.Timeouts.WebSocketIdle = tt.idle
+			if got := cfg.Timeouts.WebSocketIdleTimeout(); got != tt.want {
+				t.Errorf("WebSocketIdleTimeout() = %v, want %v", got, tt.want)
+			}
+			if err := ValidateMultiChain(&cfg); (err == nil) != tt.wantValid {
+				t.Errorf("ValidateMultiChain err = %v, want valid=%v", err, tt.wantValid)
+			}
+		})
+	}
+	if DefaultWebSocketIdle <= 27*time.Second {
+		t.Errorf("DefaultWebSocketIdle = %v must exceed the CometBFT ping period (27s)", DefaultWebSocketIdle)
 	}
 }
 

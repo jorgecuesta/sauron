@@ -158,12 +158,35 @@ func (n *MultiChainNetwork) FindEndpoint(protocol string) *NetworkEndpoint {
 	return nil
 }
 
-// HeightCheckInterval returns the height check interval with a default of 30s.
+// DefaultCheckInterval is the period of a periodic check whose interval is
+// unset (height_check.interval, archival.check_interval, sync.check_interval).
+const DefaultCheckInterval = 30 * time.Second
+
+// HeightCheckInterval returns how often the network's internal nodes are
+// checked (height and per-protocol health), DefaultCheckInterval when unset.
 func (n *MultiChainNetwork) HeightCheckInterval() time.Duration {
 	if n.HeightCheck != nil && n.HeightCheck.Interval > 0 {
 		return n.HeightCheck.Interval
 	}
-	return 30 * time.Second
+	return DefaultCheckInterval
+}
+
+// Interval returns how often archival status is checked, DefaultCheckInterval
+// when unset.
+func (a *ArchivalCheck) Interval() time.Duration {
+	if a != nil && a.CheckInterval > 0 {
+		return a.CheckInterval
+	}
+	return DefaultCheckInterval
+}
+
+// Interval returns how often the sync oracles are queried,
+// DefaultCheckInterval when unset.
+func (s *SyncCheck) Interval() time.Duration {
+	if s != nil && s.CheckInterval > 0 {
+		return s.CheckInterval
+	}
+	return DefaultCheckInterval
 }
 
 // HeightCheckProtocol returns the protocol used for height checks.

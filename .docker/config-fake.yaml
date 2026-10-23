@@ -1,0 +1,41 @@
+# Sauron config for the deterministic L3 suite (docker-compose.fake.yaml).
+listen: ":3000"
+auth: false
+timeouts:
+  health_check: 3s
+  proxy: 30s
+rate_limit:
+  enabled: false
+redis:
+  enabled: false
+networks:
+  - name: pocket
+    type: cosmos
+    height_check:
+      protocol: rpc
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+        advertise: "http://localhost:8080"
+      - protocol: rpc
+        listen: ":8081"
+        advertise: "http://localhost:8081"
+      - protocol: grpc
+        listen: ":8082"
+        advertise: "localhost:8082"
+internals:
+  - name: node-a
+    network: pocket
+    grpc_insecure: true
+    endpoints:
+      rest: "http://node-a:1317"
+      rpc: "http://node-a:26657"
+      grpc: "node-a:9090"
+  - name: node-b
+    network: pocket
+    grpc_insecure: true
+    endpoints:
+      rest: "http://node-b:1317"
+      rpc: "http://node-b:26657"
+      grpc: "node-b:9090"
+users: []

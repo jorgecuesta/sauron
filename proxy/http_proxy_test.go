@@ -234,44 +234,6 @@ internals:
 }
 
 // ---------------------------------------------------------------------------
-// T4: TestHandleWebSocketUsesOriginalNodeMetrics
-// ---------------------------------------------------------------------------
-
-// TestHandleWebSocketUsesOriginalNodeMetrics verifies that handleWebSocket uses
-// the nodeMetrics it receives (from the already-selected node) rather than
-// calling GetBestNode a second time.  Specifically: if nodeMetrics says
-// WebSocketAvailable=false, the proxy must return 503 without touching the
-// network.
-func TestHandleWebSocketUsesOriginalNodeMetrics(t *testing.T) {
-	// Use a backend that should never be reached.
-	target, _ := url.Parse("ws://unreachable.invalid:9999")
-
-	nm := &storage.NodeMetrics{
-		Height:             100,
-		WebSocketAvailable: false, // node does NOT support WebSocket
-	}
-	decision := &selector.SelectionDecision{Reason: "only_available"}
-
-	p := &HTTPProxy{
-		logger:       zap.NewNop(),
-		endpointType: "rest",
-		network:      "testnet",
-	}
-
-	// Build a real HTTP/1.1 request with WebSocket upgrade headers.
-	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", "websocket")
-
-	rr := httptest.NewRecorder()
-	p.handleWebSocket(rr, req, target, "node-1", "testnet", time.Now(), decision, nm)
-
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", rr.Code)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // T5: TestHTTPProxy_RetryOnRetriableCode
 // ---------------------------------------------------------------------------
 
