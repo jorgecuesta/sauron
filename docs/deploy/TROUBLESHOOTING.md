@@ -66,7 +66,9 @@ $C logs sauron 2>&1 | grep -E 'Height check failed|No nodes available'
 - `sauron_routing_failures_total{reason="no_websocket_nodes"}` grows: a
   WebSocket upgrade found no node whose WebSocket check passes
   (`sauron_node_websocket_available` 0). The node's RPC must serve
-  `/websocket`. The public beta endpoint did not on 2026-10-22.
+  `/websocket`. (Sauron before v2.0.0-beta.3 also answered `503 WebSocket not
+  supported by selected backend` when it picked a node without WebSocket;
+  measured on beta on 2026-10-22, on every node.)
 - gRPC only, while REST and RPC work: `grpc_insecure` does not match the node
   (`true` against a TLS node measured: `no available nodes`), or the address
   has a scheme (see above).

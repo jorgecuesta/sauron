@@ -91,10 +91,8 @@ install -m 0755 sauron-v2.0.0-beta.3-linux-amd64 ./sauron
 Expect `Sauron v2.0.0-beta.3`, then `...: valid: 1 networks, 1 internal nodes,
 0 externals` and the stand-in's `1 internal node` warning; then run the runbook's checks from
 [step 5](DOCKER_COMPOSE.md#step-5-check-the-status-api) on, with `./sauron`
-where they say `$C exec sauron /app/sauron`. Not run as written:
-v2.0.0-beta.3 was not published when this was written, so the download is
-unverified; `-validate` and the start were run on a binary built from the same
-commit. Run it under your process manager with a memory limit; `SIGTERM` stops
+where they say `$C exec sauron /app/sauron`. The download, `-version` and
+`-validate` were run as written on 2026-10-23. Run it under your process manager with a memory limit; `SIGTERM` stops
 it.
 
 ## Kubernetes

@@ -12,9 +12,10 @@ It goes in two halves:
    needed. It proves the container, the config and every client path.
 2. **Steps 8 to 10**: the human's nodes, later changes, stopping.
 
-Every **Expect** below comes from a real run on 2026-10-22, with the image
-built from this repository at commit `77a9b5d` (v2.0.0-beta.3 was not yet
-published), unless it says **not verified**. Heights, timestamps and ids
+Every **Expect** below comes from a real run, on 2026-10-22 with an image
+built from this repository before the release, and re-run on 2026-10-23
+with the published `2.0.0-beta.3` image (steps 3, 5, 6 and 7), unless it says
+**not verified**. Heights, timestamps and ids
 differ on every run; `...` marks lines left out.
 
 How to read a step: **Run** the command, compare with **Expect**, use **If
@@ -105,9 +106,9 @@ git checkout v2.0.0-beta.3
 
 **Expect**: `HEAD is now at ...`.
 
-**If not**: `error: pathspec 'v2.0.0-beta.3' did not match` means that
-release is not published yet. Stay on `main`; step 3 then builds the image
-from the checkout.
+**If not**: `error: pathspec 'v2.0.0-beta.3' did not match`: the clone is
+not of `github.com/pokt-network/sauron`, or its tags were not fetched
+(`git fetch --tags`).
 
 **Run**
 
@@ -185,10 +186,10 @@ least 2 of the human's.
 A missing warning line means the image is not this checkout's: go back to
 the start of this step and `$C build`.
 
-The first `run` on a host pulls the image, or builds it when the tag cannot
-be pulled (not published yet, or no access to ghcr.io):
-`Image ghcr.io/pokt-network/sauron:2.0.0-beta.3 Pulling`, then `Building`
-and the Docker build steps, a few minutes.
+The first `run` on a host pulls the image (`Image
+ghcr.io/pokt-network/sauron:2.0.0-beta.3 Pulling`, then `Pulled`). Without
+access to ghcr.io, Compose builds it from the checkout instead (`Building`
+and the Docker build steps, a few minutes).
 
 **If not**: the line says what is wrong and in which file; see
 [TROUBLESHOOTING.md, "Validation errors"](TROUBLESHOOTING.md#validation-errors).
@@ -236,9 +237,8 @@ Ready 200
 {"height":756321}
 ```
 
-A build from the checkout prints `Sauron built-from-checkout` (measured)
-instead of the version; the release image prints the tag (not verified until
-v2.0.0-beta.3 is published). `/pocket/status` lists `endpoints` too once `advertise` URLs are set.
+A build from the checkout prints `Sauron built-from-checkout` instead of the
+version. `/pocket/status` lists `endpoints` too once `advertise` URLs are set.
 
 **If not**: `connection refused`: the container is not up (step 4) or the
 port is mapped elsewhere (`.env`). `Service not ready: first health checks
@@ -261,17 +261,18 @@ curl -s localhost:3000/metrics | grep -E '^sauron_node_(height|available|websock
 ```
 sauron_node_available{network="pocket",node="pnf-beta-public",type="rpc"} 1
 sauron_node_height{network="pocket",node="pnf-beta-public",source="internal",type="rpc"} 756321
-sauron_node_websocket_available{network="pocket",node="pnf-beta-public",type="websocket"} 0
+sauron_node_websocket_available{network="pocket",node="pnf-beta-public",type="websocket"} 1
 ```
 
-`sauron_node_available` 1 and a height that grows on the next run (beta made
-about 2 blocks a minute on 2026-10-22) mean the node is checked and routable.
+`sauron_node_available` 1 and a height that grows on a later run mean the
+node is checked and routable. Beta's block rate varies: about 2 a minute at
+one point on 2026-10-22, 6 in 15 minutes a few hours later, so wait a few
+minutes before calling the height stuck.
 
-`sauron_node_websocket_available` was 0 on beta: the public beta endpoint
-answered every WebSocket upgrade with `503 WebSocket not supported by selected
-backend` on 2026-10-22, while the mainnet endpoint answered `101`. That is the
-stand-in, not your deployment; with your own nodes it is 1 when their RPC
-serves `/websocket`.
+`sauron_node_websocket_available` 1 means the node's WebSocket passed its
+check, so WebSocket clients can be routed to it. (On 2026-10-22, before beta
+ran v2.0.0-beta.3, the public beta endpoint refused every upgrade and this
+was 0.)
 
 **If not**: `sauron_node_available ... 0`: the node failed its height check;
 `$C logs sauron | grep 'Height check failed'` gives the reason.
@@ -309,11 +310,11 @@ curl -s -i -m 5 -N --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
   localhost:8081/websocket | head -1
 ```
 
-**Expect**, with the beta stand-in: `HTTP/1.1 503 Service Unavailable`, body
-`No available nodes`, because no node passes the WebSocket check (step 6).
-With nodes whose WebSocket works: `HTTP/1.1 101 Switching Protocols` (seen
-through Sauron with the mainnet endpoint, which then delivered a `NewBlock`
-event).
+**Expect**: `HTTP/1.1 101 Switching Protocols`.
+
+**If not**: `HTTP/1.1 503 Service Unavailable` with body `No available
+nodes`: no node passes the WebSocket check (`sauron_node_websocket_available`
+0 in step 6).
 
 **If not**: `No available nodes` on REST, RPC or gRPC: no node is healthy for
 that protocol; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#no-available-nodes).
