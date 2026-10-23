@@ -2,7 +2,9 @@ package storage
 
 import (
 	"fmt"
+	"sauron/metrics"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -44,6 +46,7 @@ func (s *HealthStore) SetHealthy(network, node, protocol string) {
 		Healthy:   true,
 		LastCheck: time.Now(),
 	})
+	exportAvailable(network, node, protocol, 1)
 }
 
 // SetUnhealthy marks a node's protocol endpoint as unhealthy with the given error.
@@ -54,6 +57,20 @@ func (s *HealthStore) SetUnhealthy(network, node, protocol, errMsg string) {
 		LastCheck: time.Now(),
 		LastError: errMsg,
 	})
+	exportAvailable(network, node, protocol, 0)
+}
+
+// exportAvailable publishes whether node is routable for protocol as
+// sauron_node_available{type=protocol}. Every writer of routability goes
+// through the HealthStore (health checks and the circuit breaker), so the
+// gauge follows what the selector sees, per protocol, as V1 exported it.
+// External endpoints ("ext:<url>") are skipped: a URL is an unbounded label.
+// WebSocket has its own gauge, sauron_node_websocket_available.
+func exportAvailable(network, node, protocol string, v float64) {
+	if strings.HasPrefix(node, "ext:") || protocol == "websocket" {
+		return
+	}
+	metrics.NodeAvailable.WithLabelValues(network, node, protocol).Set(v)
 }
 
 // IsHealthy returns whether a node's protocol endpoint is healthy.

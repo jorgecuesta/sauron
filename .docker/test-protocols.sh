@@ -37,6 +37,16 @@ metric_sum() {
     curl -s "http://localhost:${STATUS_PORT}/metrics" | grep -E "^$1(\{| )" | grep -E "${2:-.}" | awk '{s+=$NF} END {print s+0}'
 }
 
+# metric_min / metric_max: lowest / highest value among the matching series
+# ("none" when no series matches). sauron_node_available has one series per
+# protocol, so min 1 means available on every protocol, max 0 on none.
+metric_min() {
+    curl -s "http://localhost:${STATUS_PORT}/metrics" | grep -E "^$1(\{| )" | grep -E "${2:-.}" | awk 'NR==1||$NF<m{m=$NF} END {print (NR?m:"none")}'
+}
+metric_max() {
+    curl -s "http://localhost:${STATUS_PORT}/metrics" | grep -E "^$1(\{| )" | grep -E "${2:-.}" | awk 'NR==1||$NF>m{m=$NF} END {print (NR?m:"none")}'
+}
+
 # rest_node: which fake node served a REST request through Sauron ("" on non-200).
 rest_node() {
     curl -s -o /dev/null -D - --max-time 5 "http://localhost:${REST_PORT}/cosmos/base/tendermint/v1beta1/blocks/latest" |
@@ -88,12 +98,12 @@ echo "   serving: $SERVING -> failing it"
 curl -sf -X POST "http://localhost:${FAIL_ADMIN}/admin/fail" >/dev/null || fail "admin fail request"
 
 ELAPSED=0
-until [ "$(metric_sum sauron_node_available "node=\"$SERVING\"")" = "0" ]; do
+until [ "$(metric_max sauron_node_available "node=\"$SERVING\"")" = "0" ]; do
     [ $ELAPSED -ge 75 ] && break
     sleep 3
     ELAPSED=$((ELAPSED + 3))
 done
-if [ "$(metric_sum sauron_node_available "node=\"$SERVING\"")" = "0" ]; then
+if [ "$(metric_max sauron_node_available "node=\"$SERVING\"")" = "0" ]; then
     pass "$SERVING marked unavailable after ${ELAPSED}s"
 else
     fail "$SERVING still marked available after ${ELAPSED}s"
@@ -110,12 +120,12 @@ if smoke >/dev/null 2>&1; then pass "all client paths still work with $SERVING d
 echo "== Recovery: the node comes back into rotation"
 curl -sf -X POST "http://localhost:${FAIL_ADMIN}/admin/recover" >/dev/null || fail "admin recover request"
 ELAPSED=0
-until [ "$(metric_sum sauron_node_available "node=\"$SERVING\"")" = "1" ]; do
+until [ "$(metric_min sauron_node_available "node=\"$SERVING\"")" = "1" ]; do
     [ $ELAPSED -ge 75 ] && break
     sleep 3
     ELAPSED=$((ELAPSED + 3))
 done
-if [ "$(metric_sum sauron_node_available "node=\"$SERVING\"")" = "1" ]; then
+if [ "$(metric_min sauron_node_available "node=\"$SERVING\"")" = "1" ]; then
     pass "$SERVING marked available again after ${ELAPSED}s"
 else
     fail "$SERVING not marked available after ${ELAPSED}s"
