@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"sauron/config"
 	"sauron/selector"
@@ -22,6 +23,7 @@ type Handler struct {
 	configLoader *config.MultiChainLoader
 	logger       *zap.Logger
 	rateLimiter  *RateLimiter
+	ready        atomic.Pointer[func() bool] // readiness gate for /ready; nil means ready
 }
 
 // StatusResponse represents the response format.
@@ -226,13 +228,20 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
-// handleReady returns 200 if height checks are working
+// SetReadiness sets what /ready reports: 200 once ready returns true, 503
+// before. The server passes the scheduler's Ready (first round of checks done).
+func (h *Handler) SetReadiness(ready func() bool) {
+	h.ready.Store(&ready)
+}
+
+// handleReady returns 200 once the readiness gate passes (see SetReadiness).
+// It does not follow node health: replicas that share nodes would all leave
+// the load balancer at once when the nodes fail, and clients would get
+// connection errors instead of a fast 503 from Sauron.
 func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
-	// Simple readiness check: are we tracking any heights?
-	cfg := h.configLoader.Get()
-	if len(cfg.Internals) == 0 {
-		http.Error(w, "Service not ready: no internal nodes configured", http.StatusServiceUnavailable)
-		h.logger.Warn("Readiness check failed: no internal nodes",
+	if ready := h.ready.Load(); ready != nil && !(*ready)() {
+		http.Error(w, "Service not ready: first health checks not finished", http.StatusServiceUnavailable)
+		h.logger.Debug("Readiness check: first health checks not finished",
 			zap.String("request_id", getRequestID(r)),
 		)
 		return

@@ -167,7 +167,7 @@ docker run -d --name sauron -p 3000:3000 -p 8080-8082:8080-8082 \
   -v /path/to/config.yaml:/app/config.yaml:ro sauron:latest
 ```
 
-Probes: `/health` for liveness and `/ready` for readiness. `/ready` only checks that internal nodes are configured; it stays 200 when none of them is routable.
+Probes: `/health` for liveness and `/ready` for readiness. `/ready` answers 503 until the first round of checks has finished (every internal node checked once; with only externals, the rings queried once), then 200 for good. It does not follow node health: replicas that share nodes would all leave the load balancer at once when the nodes fail, and clients would get connection errors instead of Sauron's fast `503 No available nodes`.
 
 ### Security
 

@@ -43,9 +43,13 @@ type MultiChainScheduler struct {
 	archivalStore *storage.ArchivalStore
 	configLoader  *config.MultiChainLoader
 	logger        *zap.Logger
-	timeout       atomic.Int64                  // health-check timeout (ns); written by every cron job, so atomic
-	lastRun       *xsync.Map[string, time.Time] // when each periodic check last ran, by "kind:network"
-	inFlight      sync.Map                      // check key -> *atomic.Bool, set while that check runs
+	timeout       atomic.Int64 // health-check timeout (ns); written by every cron job, so atomic
+
+	heightChecked    sync.Map                      // "network:node" -> struct{}: its first height check finished, or none applies
+	externalsQueried atomic.Bool                   // the external rings were queried at least once
+	ready            atomic.Bool                   // Ready latched true
+	lastRun          *xsync.Map[string, time.Time] // when each periodic check last ran, by "kind:network"
+	inFlight         sync.Map                      // check key -> *atomic.Bool, set while that check runs
 }
 
 // goOnce runs fn on the pool unless the previous run of the check named key is
@@ -106,6 +110,36 @@ func NewMultiChainScheduler(
 	}
 	s.timeout.Store(int64(5 * time.Second))
 	return s
+}
+
+// Ready reports whether the first round of checks has finished: every
+// internal node's height check completed once (success or failure, so it says
+// nothing about node health), or, with no internal nodes, the external rings
+// were queried once. It latches: once true it stays true, so a node added
+// later does not take a replica out of service, and nodes that all fail do not
+// take every replica out at once.
+func (s *MultiChainScheduler) Ready() bool {
+	if s.ready.Load() {
+		return true
+	}
+	cfg := s.configLoader.Get()
+	if len(cfg.Internals) == 0 {
+		if !s.externalsQueried.Load() {
+			return false
+		}
+	}
+	for _, node := range cfg.Internals {
+		if _, ok := s.heightChecked.Load(node.Network + ":" + node.Name); !ok {
+			return false
+		}
+	}
+	s.ready.Store(true)
+	return true
+}
+
+// markHeightChecked records that node's first height check has finished.
+func (s *MultiChainScheduler) markHeightChecked(network, node string) {
+	s.heightChecked.Store(network+":"+node, struct{}{})
 }
 
 // checkTimeout returns the current health-check timeout.
@@ -237,6 +271,7 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 
 		network := cfg.FindNetwork(node.Network)
 		if network == nil {
+			s.markHeightChecked(node.Network, node.Name)
 			s.logger.Warn("Node references unknown network",
 				zap.String("node", node.Name),
 				zap.String("network", node.Network),
@@ -247,6 +282,7 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 		// Get the adapter for this network type.
 		adpt, err := s.registry.Get(network.Type)
 		if err != nil {
+			s.markHeightChecked(node.Network, node.Name)
 			s.logger.Warn("No adapter for network type",
 				zap.String("network", node.Network),
 				zap.String("type", network.Type),
@@ -261,6 +297,7 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 		// Run height check.
 		checkCfg, err := adpt.HeightCheck(netCfg)
 		if err != nil {
+			s.markHeightChecked(node.Network, node.Name)
 			s.logger.Warn("Failed to get height check config",
 				zap.String("network", node.Network),
 				zap.Error(err),
@@ -271,6 +308,7 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 		// Determine the node URL for the height check protocol.
 		nodeURL := node.Endpoints[checkCfg.Protocol]
 		if nodeURL == "" {
+			s.markHeightChecked(node.Network, node.Name)
 			s.logger.Debug("Node has no endpoint for height check protocol",
 				zap.String("node", node.Name),
 				zap.String("protocol", checkCfg.Protocol),
@@ -279,8 +317,11 @@ func (s *MultiChainScheduler) checkNetworkNodes(cfg *config.MultiChainConfig, ne
 		}
 
 		// Skip gRPC height checks — engine only handles HTTP.
-		if !checkCfg.IsGRPC {
+		if checkCfg.IsGRPC {
+			s.markHeightChecked(node.Network, node.Name)
+		} else {
 			s.goOnce("height:"+node.Network+":"+node.Name, func() {
+				defer s.markHeightChecked(node.Network, node.Name)
 				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
@@ -499,6 +540,7 @@ func (s *MultiChainScheduler) checkExternalRings() {
 				ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout())
 				defer cancel()
 
+				defer s.externalsQueried.Store(true)
 				if err := s.extChecker.CheckExternal(ctx, external, network); err != nil {
 					s.logger.Debug("External check failed",
 						zap.String("external", external.Name),
