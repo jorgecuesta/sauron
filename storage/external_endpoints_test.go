@@ -288,3 +288,29 @@ func TestExternalEndpointStore_GRPCTransportConcurrent(t *testing.T) {
 		t.Fatal("want known=true after concurrent writes")
 	}
 }
+
+// Two rings advertising one URL share its recorded transport, the last
+// validation winning; removing one ring keeps it, removing both forgets it.
+func TestExternalEndpointStore_GRPCTransportSharedURL(t *testing.T) {
+	t.Parallel()
+
+	s := NewExternalEndpointStore(zap.NewNop())
+	s.StoreAdvertised("ring-a", "https://ring-a:3000", "pocket", "grpc", "g:443")
+	s.StoreAdvertised("ring-b", "https://ring-b:3000", "pocket", "grpc", "g:443")
+	s.SetGRPCTransport("ring-a", "https://ring-a:3000", "pocket", "grpc", "g:443", true)
+	s.SetGRPCTransport("ring-b", "https://ring-b:3000", "pocket", "grpc", "g:443", false)
+	for i := 0; i < 20; i++ {
+		if insecure, known := s.GRPCTransport("g:443"); !known || insecure {
+			t.Fatalf("got insecure=%v known=%v, want the last validation (TLS)", insecure, known)
+		}
+	}
+
+	s.RemoveExternals(func(name, _ string) bool { return name != "ring-a" })
+	if _, known := s.GRPCTransport("g:443"); !known {
+		t.Fatal("ring-b still advertises g:443: transport must be kept")
+	}
+	s.RemoveExternals(func(string, string) bool { return false })
+	if _, known := s.GRPCTransport("g:443"); known {
+		t.Fatal("no ring advertises g:443: transport must be forgotten")
+	}
+}

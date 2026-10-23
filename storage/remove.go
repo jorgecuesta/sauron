@@ -104,5 +104,18 @@ func (s *ExternalEndpointStore) RemoveExternals(keep func(externalName, ringURL 
 			delete(s.endpoints, key)
 		}
 	}
+	// Forget the transport of gRPC URLs no remaining endpoint has.
+	for url := range s.grpcTransports {
+		still := false
+		for _, ep := range s.endpoints {
+			if ep.Type == "grpc" && ep.URL == url {
+				still = true
+				break
+			}
+		}
+		if !still {
+			delete(s.grpcTransports, url)
+		}
+	}
 	return removed
 }

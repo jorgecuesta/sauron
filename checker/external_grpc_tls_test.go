@@ -1,13 +1,20 @@
 package checker
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	tmservice "cosmossdk.io/api/cosmos/base/tendermint/v1beta1"
+	"google.golang.org/grpc"
+
+	"sauron/internal/grpcutil"
 	"sauron/internal/testtls"
 )
 
@@ -102,5 +109,99 @@ func TestRecoverFailedEndpoints_TLSEndpointRecovers(t *testing.T) {
 	}
 	if insecure, known := store.GRPCTransport(addr); !known || insecure {
 		t.Fatalf("GRPCTransport: got insecure=%v known=%v, want TLS", insecure, known)
+	}
+}
+
+// After a plaintext endpoint validates, only its plaintext connection stays
+// cached: the failed TLS attempt's connection is closed, not left reconnecting.
+func TestValidateGRPCAnyTransport_DropsLosingConnection(t *testing.T) {
+	t.Parallel()
+
+	addr, stop, err := testtls.StartBlockServer(nil, 976400)
+	if err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(stop)
+	c, _, _ := newTestExternalChecker(t, nil)
+	t.Cleanup(c.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, insecure, err := c.validateGRPCAnyTransport(ctx, addr); err != nil || !insecure {
+		t.Fatalf("validate: insecure=%v err=%v, want plaintext", insecure, err)
+	}
+	if _, ok := c.grpcConnections.Load(grpcutil.ConnKey(addr, false)); ok {
+		t.Error("the failed TLS connection is still cached")
+	}
+	if _, ok := c.grpcConnections.Load(grpcutil.ConnKey(addr, true)); !ok {
+		t.Error("the working plaintext connection is not cached")
+	}
+}
+
+// stallTLSListener hands plaintext connections to the server and holds TLS
+// ones (first byte 0x16, a handshake record) open without answering.
+type stallTLSListener struct {
+	net.Listener
+	mu   sync.Mutex
+	held []net.Conn
+}
+
+func (l *stallTLSListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		br := bufio.NewReader(conn)
+		b, err := br.Peek(1)
+		if err != nil {
+			_ = conn.Close()
+			continue
+		}
+		if b[0] == 0x16 {
+			l.mu.Lock()
+			l.held = append(l.held, conn) // never answered
+			l.mu.Unlock()
+			continue
+		}
+		return &peekedConn{Conn: conn, r: br}, nil
+	}
+}
+
+type peekedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *peekedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// A TLS attempt that stalls must not use the whole check deadline: the
+// plaintext attempt still gets time and the endpoint validates.
+func TestValidateGRPCAnyTransport_StalledFirstAttemptLeavesTime(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	sl := &stallTLSListener{Listener: ln}
+	t.Cleanup(func() {
+		sl.mu.Lock()
+		defer sl.mu.Unlock()
+		for _, c := range sl.held {
+			_ = c.Close()
+		}
+	})
+	srv := grpc.NewServer()
+	tmservice.RegisterServiceServer(srv, &fakeTMService{})
+	go func() { _ = srv.Serve(sl) }()
+	t.Cleanup(srv.Stop)
+
+	c, _, _ := newTestExternalChecker(t, nil)
+	t.Cleanup(c.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if _, insecure, err := c.validateGRPCAnyTransport(ctx, ln.Addr().String()); err != nil || !insecure {
+		t.Fatalf("validate: insecure=%v err=%v, want plaintext within the deadline", insecure, err)
 	}
 }

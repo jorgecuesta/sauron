@@ -319,19 +319,38 @@ func (c *ExternalChecker) validateGRPCEndpoint(ctx context.Context, url string, 
 
 // validateGRPCAnyTransport validates a gRPC endpoint over TLS or plaintext: a
 // ring does not say which its endpoint speaks. It tries the transport that
-// last worked for url first (TLS when none did), then the other, and returns
-// the one that answered (insecure means plaintext).
+// last worked for url first (TLS when none did), within half the time left so
+// a stalled attempt leaves room for the other, then the other, and returns the
+// one that answered (insecure means plaintext). The losing transport's cached
+// connection is closed, so a dead one does not keep reconnecting.
 func (c *ExternalChecker) validateGRPCAnyTransport(ctx context.Context, url string) (time.Duration, bool, error) {
 	first, _ := c.endpointStore.GRPCTransport(url)
-	latency, err := c.validateGRPCEndpoint(ctx, url, first)
+
+	firstCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		firstCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		defer cancel()
+	}
+	latency, err := c.validateGRPCEndpoint(firstCtx, url, first)
 	if err == nil {
 		return latency, first, nil
 	}
 	latency, err2 := c.validateGRPCEndpoint(ctx, url, !first)
 	if err2 == nil {
+		c.dropGRPCConnection(url, first)
 		return latency, !first, nil
 	}
+	c.dropGRPCConnection(url, !first)
 	return latency, false, fmt.Errorf("%s: %w; %s: %w", transportName(first), err, transportName(!first), err2)
+}
+
+// dropGRPCConnection closes and forgets the cached connection to url over the
+// given transport, if any.
+func (c *ExternalChecker) dropGRPCConnection(url string, insecure bool) {
+	if conn, ok := c.grpcConnections.LoadAndDelete(grpcutil.ConnKey(url, insecure)); ok {
+		_ = conn.Close()
+	}
 }
 
 func transportName(insecure bool) string {
@@ -364,7 +383,8 @@ func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc
 	return conn, nil
 }
 
-// createGRPCConnection dials gRPC and warms up the connection.
+// createGRPCConnection dials gRPC. The connection is lazy: the validation
+// call that follows connects it, within the check's own deadline.
 func (c *ExternalChecker) createGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
 	cfg := c.configLoader.Get()
 	ka := keepalive.ClientParameters{
@@ -380,22 +400,6 @@ func (c *ExternalChecker) createGRPCConnection(url string, useInsecure bool) (*g
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	// Warm up — best effort, non-blocking
-	client := tmservice.NewServiceClient(conn)
-	warmupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if _, err := client.GetLatestBlock(warmupCtx, &tmservice.GetLatestBlockRequest{}); err != nil {
-		c.logger.Warn("gRPC connection warmup failed, will establish on first validation",
-			zap.String("url", url),
-			zap.Error(err),
-		)
-	} else {
-		c.logger.Debug("gRPC connection established and warmed up",
-			zap.String("url", url),
-		)
 	}
 
 	return conn, nil
