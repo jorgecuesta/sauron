@@ -414,12 +414,15 @@ func (p *HTTPProxy) handleWebSocket(w http.ResponseWriter, r *http.Request, targ
 		zap.String("network", network),
 	)
 
+	// Counted when the upgrade arrives, not when the session ends: a session
+	// can last hours, and the client sees the 101 only after this.
+	metrics.NodeRequests.WithLabelValues(network, nodeName, p.endpointType, "WEBSOCKET").Inc()
+
 	statusCode, err := ProxyWebSocket(w, r, target.String(), p.logger, p.configLoader.Get().Timeouts.WebSocketIdleTimeout())
 	duration := time.Since(start)
 
 	statusStr := strconv.Itoa(statusCode)
 	metrics.ProxyRequestDuration.WithLabelValues(network, nodeName, p.endpointType, statusStr).Observe(duration.Seconds())
-	metrics.NodeRequests.WithLabelValues(network, nodeName, p.endpointType, "WEBSOCKET").Inc()
 
 	if err != nil {
 		// Extract granular error category from WSProxyError.
