@@ -1,0 +1,58 @@
+# Sauron in front of Pocket Network beta nodes.
+#
+# As shipped, the one internal node is the PUBLIC beta endpoint run by the
+# Pocket Network Foundation (itself a Sauron). It is a stand-in so this example
+# starts with no node of your own: replace it with your own pocketd nodes
+# (see "Your own nodes" below) before you send real traffic through it.
+#
+# Check this file after every edit:
+#   docker compose -f examples/pocket/docker-compose.yaml run --rm sauron -validate -config /app/config/config.yaml
+
+listen: ":3000"            # status API: /health, /ready, /metrics, /pocket/status
+
+timeouts:
+  health_check: 5s         # timeout of each height and health check
+  proxy: 60s               # timeout of each proxied request
+  websocket_idle: 90s      # close a WebSocket after this long without bytes from the node
+
+networks:
+  - name: pocket           # clients and other rings see this name; /pocket/status
+    type: cosmos           # Pocket Network is a Cosmos SDK chain
+    height_check:
+      protocol: rpc        # height from RPC /abci_info (the app-committed height)
+      interval: 30s        # how often each node is checked
+    endpoints:             # what Sauron listens on, inside the container
+      - protocol: rest     # Cosmos REST (pocketd :1317)
+        listen: ":8080"
+      - protocol: rpc      # CometBFT RPC (pocketd :26657), and WebSocket on /websocket
+        listen: ":8081"
+      - protocol: grpc     # Cosmos gRPC (pocketd :9090)
+        listen: ":8082"
+
+internals:
+  - name: pnf-beta-public  # stand-in: the public beta endpoint, over TLS
+    network: pocket
+    grpc_insecure: false   # this endpoint speaks TLS on 443
+    endpoints:
+      rest: "https://sauron-api.beta.infra.pocket.network"
+      rpc: "https://sauron-rpc.beta.infra.pocket.network"
+      grpc: "sauron-grpc.beta.infra.pocket.network:443"
+
+# Your own nodes: one entry per pocketd node, with the ports pocketd uses by
+# default. List at least 2 so Sauron can fail over. Plaintext gRPC inside a
+# private network needs grpc_insecure: true.
+#
+#  - name: node-1
+#    network: pocket
+#    grpc_insecure: true
+#    endpoints:
+#      rest: "http://10.0.0.11:1317"
+#      rpc: "http://10.0.0.11:26657"
+#      grpc: "10.0.0.11:9090"
+#  - name: node-2
+#    network: pocket
+#    grpc_insecure: true
+#    endpoints:
+#      rest: "http://10.0.0.12:1317"
+#      rpc: "http://10.0.0.12:26657"
+#      grpc: "10.0.0.12:9090"
