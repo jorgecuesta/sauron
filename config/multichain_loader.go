@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,7 @@ type MultiChainLoader struct {
 	path     string
 	reloadMu sync.Mutex                // serializes read+store so the newest file always wins
 	onReload []func(*MultiChainConfig) // guarded by reloadMu
+	warned   []string                  // what logWarnings last logged; guarded by reloadMu after startup
 }
 
 // OnReload registers fn to run after every reload that changes the running
@@ -59,6 +62,7 @@ func NewMultiChainLoader(configPath string, logger *zap.Logger) (*MultiChainLoad
 	if err != nil {
 		return nil, err
 	}
+	l.logWarnings(l.v, cfg)
 
 	l.config.Store(cfg)
 	metrics.ConfigReloadOK.Set(1)
@@ -76,6 +80,149 @@ func NewMultiChainLoader(configPath string, logger *zap.Logger) (*MultiChainLoad
 	l.v.WatchConfig()
 
 	return l, nil
+}
+
+// LoadMultiChainFile reads, validates and defaults the config file at path the
+// way the server does at startup, without watching it. It is stricter than the
+// server: what strictProblems finds is an error here, while the server logs it
+// and starts, so a file that ran before an upgrade still runs after it.
+func LoadMultiChainFile(path string) (*MultiChainConfig, error) {
+	v := newConfigViper(path)
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+	cfg, err := parseMultiChain(v)
+	if err != nil {
+		if unknown := unknownKeys(v); len(unknown) > 0 {
+			return nil, fmt.Errorf("%w; unknown keys (misspelled, or from the V1 format): %s", err, strings.Join(unknown, ", "))
+		}
+		return nil, err
+	}
+	if problems := strictProblems(v, cfg); len(problems) > 0 {
+		return nil, errors.New(strings.Join(problems, "; "))
+	}
+	return cfg, nil
+}
+
+// strictProblems returns the mistakes the server tolerates for compatibility:
+// keys no field reads (misspelled, or from the V1 format), and gRPC addresses
+// written as URLs. "https://host:443" as a node's gRPC address never routes
+// (measured: the node stays out with "no available nodes"); TLS is chosen by
+// grpc_insecure, and the address is host:port or a dns:/// target.
+func strictProblems(v *viper.Viper, cfg *MultiChainConfig) []string {
+	var problems []string
+	if unknown := unknownKeys(v); len(unknown) > 0 {
+		problems = append(problems, "unknown keys (misspelled, or from the V1 format): "+strings.Join(unknown, ", "))
+	}
+	return append(problems, grpcTargetProblems(cfg)...)
+}
+
+// grpcTargetProblems returns the gRPC addresses in cfg written as URLs.
+func grpcTargetProblems(cfg *MultiChainConfig) []string {
+	var problems []string
+	for _, net := range cfg.Networks {
+		for _, ep := range net.Endpoints {
+			if ep.Protocol == "grpc" && isURLTarget(ep.Advertise) {
+				problems = append(problems, fmt.Sprintf(
+					"network %q: grpc advertise %q must be host:port without a scheme", net.Name, ep.Advertise))
+			}
+		}
+	}
+	for _, node := range cfg.Internals {
+		if addr := node.Endpoints["grpc"]; isURLTarget(addr) {
+			problems = append(problems, fmt.Sprintf(
+				"internal node %q: grpc %q must be host:port without a scheme (TLS is set by grpc_insecure)", node.Name, addr))
+		}
+	}
+	return problems
+}
+
+// isURLTarget reports whether a gRPC address carries a URL scheme gRPC cannot
+// dial. dns:// and passthrough:// are gRPC resolver targets, not URLs.
+func isURLTarget(addr string) bool {
+	return strings.Contains(addr, "://") &&
+		!strings.HasPrefix(addr, "dns://") && !strings.HasPrefix(addr, "passthrough://")
+}
+
+// unknownKeys returns the keys in v that no field of MultiChainConfig reads.
+func unknownKeys(v *viper.Viper) []string {
+	var cfg MultiChainConfig
+	var md mapstructure.Metadata
+	if err := v.Unmarshal(&cfg, viper.DecodeHook(
+		mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+			permissionsDecodeHook(),
+		),
+	), func(c *mapstructure.DecoderConfig) { c.Metadata = &md }); err != nil {
+		return nil // parseMultiChain already decoded this file
+	}
+	sort.Strings(md.Unused)
+	return md.Unused
+}
+
+// ConfigWarnings returns what loads but is probably a mistake: an endpoint no
+// internal node of its network has a URL for, so only external rings can serve
+// it (a misspelled protocol or node URL key ends up here), and a network with
+// fewer than 2 internal nodes, which has nothing to fail over to.
+func ConfigWarnings(cfg *MultiChainConfig) []string {
+	var warnings []string
+	for _, net := range cfg.Networks {
+		nodes := 0
+		for _, node := range cfg.Internals {
+			if node.Network == net.Name {
+				nodes++
+			}
+		}
+		if nodes == 0 {
+			warnings = append(warnings, fmt.Sprintf("network %q: no internal node; only external rings can serve it", net.Name))
+			continue
+		}
+		for _, ep := range net.Endpoints {
+			served := false
+			for _, node := range cfg.Internals {
+				if node.Network == net.Name && node.Endpoints[ep.Protocol] != "" {
+					served = true
+					break
+				}
+			}
+			if !served {
+				warnings = append(warnings, fmt.Sprintf(
+					"network %q: endpoint %q has no internal node with a %q URL; only external rings can serve it",
+					net.Name, ep.Protocol, ep.Protocol))
+			}
+		}
+		if nodes == 1 {
+			warnings = append(warnings, fmt.Sprintf(
+				"network %q: 1 internal node; if it fails, clients get no available nodes (list at least 2 to fail over)", net.Name))
+		}
+	}
+	return warnings
+}
+
+// logWarnings logs what strictProblems and ConfigWarnings find; the server
+// starts anyway. A reload that finds the same set as the last one logs
+// nothing, so a stable condition is not repeated on every edit.
+func (l *MultiChainLoader) logWarnings(v *viper.Viper, cfg *MultiChainConfig) {
+	unknown := unknownKeys(v)
+	problems := grpcTargetProblems(cfg)
+	warnings := ConfigWarnings(cfg)
+
+	all := append(append(append([]string{}, unknown...), problems...), warnings...)
+	if slices.Equal(all, l.warned) {
+		return
+	}
+	l.warned = all
+
+	if len(unknown) > 0 {
+		l.logger.Warn("Unknown configuration keys ignored", zap.Strings("keys", unknown))
+	}
+	for _, p := range problems {
+		l.logger.Warn("Configuration problem", zap.String("problem", p))
+	}
+	for _, w := range warnings {
+		l.logger.Warn("Configuration warning", zap.String("warning", w))
+	}
 }
 
 // newConfigViper returns a viper instance bound to the YAML file at path.
@@ -151,6 +298,7 @@ func (l *MultiChainLoader) reload() error {
 	if err != nil {
 		return err
 	}
+	l.logWarnings(v, cfg)
 
 	eff, kept := keepStartupOnly(l.Get(), cfg)
 	if len(kept) == 0 {
