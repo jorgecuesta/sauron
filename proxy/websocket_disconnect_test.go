@@ -9,12 +9,10 @@ import (
 	"time"
 
 	"sauron/internal/testutil"
-	"sauron/metrics"
 	"sauron/selector"
 	"sauron/storage"
 
 	"github.com/gorilla/websocket"
-	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 )
 
@@ -125,13 +123,27 @@ func TestProxyWebSocket_DisconnectCategory(t *testing.T) {
 	}
 }
 
-// wsRequestCount reads the WEBSOCKET request counter for one network/node.
-func wsRequestCount(network string) float64 {
-	var m dto.Metric
-	if err := metrics.NodeRequests.WithLabelValues(network, "node-1", "rest", "WEBSOCKET").Write(&m); err != nil {
-		return 0
+// serveSignalingEnd serves h and signals on done each time a request's
+// ServeHTTP returns: for a WebSocket, after the session ended and the proxy
+// recorded its outcome (breaker included), which no metric marks.
+func serveSignalingEnd(t *testing.T, h http.Handler) (*httptest.Server, <-chan struct{}) {
+	t.Helper()
+	done := make(chan struct{}, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		done <- struct{}{}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, done
+}
+
+func waitHandlerEnd(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WebSocket proxying never finished")
 	}
-	return m.GetCounter().GetValue()
 }
 
 // TestHTTPProxy_WebSocketClientDisconnectDoesNotTripBreaker: through the full
@@ -194,11 +206,7 @@ internals:
 			cb := NewCircuitBreaker(healthStore, zap.NewNop())
 			p := NewHTTPProxy(sel, cfgLoader, endpointStore, zap.NewNop(), "rest", tc.network, cb)
 
-			proxySrv := httptest.NewServer(p)
-			t.Cleanup(proxySrv.Close)
-
-			// The counter is global: wait for it to move past its current value.
-			baseline := wsRequestCount(tc.network)
+			proxySrv, done := serveSignalingEnd(t, p)
 			conn := dialEcho(t, "ws"+proxySrv.URL[len("http"):]+"/ws")
 			if tc.clientReset {
 				resetConn(t, conn.UnderlyingConn())
@@ -206,13 +214,7 @@ internals:
 				defer func() { _ = conn.Close() }()
 			}
 
-			deadline := time.Now().Add(5 * time.Second)
-			for wsRequestCount(tc.network) < baseline+1 {
-				if time.Now().After(deadline) {
-					t.Fatal("WebSocket proxying never finished")
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
+			waitHandlerEnd(t, done)
 			if got := cb.GetErrorCount(tc.network, "node-1", "rest"); got != tc.wantCBErrors {
 				t.Errorf("circuit breaker errors = %d, want %d", got, tc.wantCBErrors)
 			}

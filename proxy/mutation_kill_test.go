@@ -377,20 +377,11 @@ func TestMutationKill_HTTPProxy_WebSocketSuccessResetsBreakerCount(t *testing.T)
 	cb.RecordError(network, "node-1", "rest", 100)
 	cb.RecordError(network, "node-1", "rest", 100)
 
-	proxySrv := httptest.NewServer(p)
-	t.Cleanup(proxySrv.Close)
-
-	baseline := wsRequestCount(network)
+	proxySrv, done := serveSignalingEnd(t, p)
 	conn := dialEcho(t, "ws"+proxySrv.URL[len("http"):]+"/ws")
 	_ = conn.Close()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for wsRequestCount(network) < baseline+1 {
-		if time.Now().After(deadline) {
-			t.Fatal("WebSocket proxying never finished")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitHandlerEnd(t, done)
 	if got := cb.GetErrorCount(network, "node-1", "rest"); got != 0 {
 		t.Errorf("circuit breaker errors after a clean WebSocket = %d, want 0", got)
 	}
