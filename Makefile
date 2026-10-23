@@ -4,6 +4,8 @@
 BINARY_NAME=sauron
 GO=go
 GOFLAGS=-v
+# What `sauron -version` prints: the tag or commit this tree is at.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 DOCKER_DIR=.docker
 
 # Tool versions are pinned and run through `go run`, so every machine and CI
@@ -26,7 +28,7 @@ all: fmt lint build
 ## build: Build the binary
 build:
 	@echo "Building $(BINARY_NAME)..."
-	$(GO) build $(GOFLAGS) -o bin/$(BINARY_NAME) .
+	$(GO) build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME) .
 
 ## fmt: Format Go code (gofmt -s + goimports)
 fmt:

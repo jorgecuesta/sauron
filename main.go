@@ -8,6 +8,9 @@ import (
 	"sauron/server"
 )
 
+// version is set at build time with -ldflags "-X main.version=<tag>".
+var version = "dev"
+
 const banner = `
 ███████╗ █████╗ ██╗   ██╗██████╗  ██████╗ ███╗   ██╗
 ██╔════╝██╔══██╗██║   ██║██╔══██╗██╔═══██╗████╗  ██║
@@ -23,13 +26,12 @@ The All-Seeing Oracle for Pocket Network
 func main() {
 	// Parse flags
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
-	version := flag.Bool("version", false, "Print version information")
+	showVersion := flag.Bool("version", false, "Print version information")
 	flag.Parse()
 
 	// Print version if requested
-	if *version {
-		fmt.Println("Sauron v1.0.0")
-		fmt.Println("The All-Seeing Oracle for Pocket Network")
+	if *showVersion {
+		fmt.Println("Sauron " + version)
 		os.Exit(0)
 	}
 

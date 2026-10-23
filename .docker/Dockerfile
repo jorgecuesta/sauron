@@ -9,8 +9,9 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build
-RUN CGO_ENABLED=0 GOOS=linux go build -o sauron .
+# Build; VERSION is what `sauron -version` prints
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o sauron .
 
 # Final stage
 FROM alpine:latest
