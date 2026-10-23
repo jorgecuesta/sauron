@@ -11,3 +11,7 @@ sauron
 
 # Session work and local files (never committed)
 .local/
+
+# Local port overrides for the Pocket example
+examples/pocket/.env
+!examples/pocket/config/config.yaml

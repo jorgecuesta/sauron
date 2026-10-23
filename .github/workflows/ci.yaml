@@ -120,25 +120,25 @@ jobs:
 
           # Build for linux/amd64
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
-            -ldflags="-s -w -extldflags '-static'" \
+            -ldflags="-s -w -X main.version=${VERSION} -extldflags '-static'" \
             -o sauron-${VERSION}-linux-amd64 \
             .
 
           # Build for linux/arm64
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
-            -ldflags="-s -w -extldflags '-static'" \
+            -ldflags="-s -w -X main.version=${VERSION} -extldflags '-static'" \
             -o sauron-${VERSION}-linux-arm64 \
             .
 
           # Build for darwin/amd64 (Intel Mac)
           GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X main.version=${VERSION}" \
             -o sauron-${VERSION}-darwin-amd64 \
             .
 
           # Build for darwin/arm64 (Apple Silicon)
           GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X main.version=${VERSION}" \
             -o sauron-${VERSION}-darwin-arm64 \
             .
 
@@ -170,6 +170,8 @@ jobs:
           context: .
           file: ./.docker/Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

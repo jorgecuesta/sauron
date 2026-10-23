@@ -4,6 +4,8 @@
 
 **Sauron** sits in front of the nodes of one or more blockchain networks. For every network it checks each node's block height and health, and routes each client request (REST, CometBFT RPC, JSON-RPC, WebSocket, gRPC) to a healthy node at the highest height, spreading load round-robin among them. Several Sauron deployments can discover each other's endpoints and use them as a fallback when their own nodes fall behind.
 
+**Where to start:** to deploy it, [docs/deploy/README.md](docs/deploy/README.md) and its runbook, with a minimal Pocket Network example in [examples/pocket/](examples/pocket/). Agents: read [AGENTS.md](AGENTS.md) first.
+
 > **Note:** Project name inspired by Tolkien's works. This is an open-source, non-commercial project with no affiliation to the Tolkien Estate.
 
 ---
@@ -88,6 +90,7 @@ internals:
 ### 3. Run
 
 ```bash
+./bin/sauron -validate -config config.yaml   # exit 0 if the file is valid; contacts no node
 ./bin/sauron -config config.yaml
 ```
 

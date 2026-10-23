@@ -17,7 +17,12 @@ make build
 
 # Or with default config.yaml in current directory
 ./bin/sauron
+
+# Check a config file and exit (0 valid, 1 not); stricter than startup
+./bin/sauron -validate -config config.yaml
 ```
+
+Deploying and operating it (for agents too): `AGENTS.md`, then `docs/deploy/` (runbook measured against Pocket beta, troubleshooting) and `examples/pocket/`. A change to what an operator sees (a message, a metric, a port, a flag) updates their **Expect** lines.
 
 **Ports**: `listen` (status API, health, metrics; usually `:3000`) plus one listener per network endpoint. The Pocket deployment uses `:8080` REST, `:8081` RPC (and WebSocket), `:8082` gRPC.
 

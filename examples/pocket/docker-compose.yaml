@@ -1,0 +1,33 @@
+# Sauron in front of Pocket Network beta. Runbook: docs/deploy/DOCKER_COMPOSE.md
+#
+# Host ports default to the ones the docs use; set them in examples/pocket/.env
+# when another program holds one.
+name: sauron-pocket
+
+services:
+  sauron:
+    # Released image (tags carry no leading "v"). When it cannot be pulled,
+    # `up` and `run` build it from this checkout instead, under the same tag.
+    image: ghcr.io/pokt-network/sauron:${SAURON_TAG:-2.0.0-beta.3}
+    build:
+      context: ../..
+      dockerfile: .docker/Dockerfile
+      args:
+        VERSION: built-from-checkout   # what `sauron -version` prints for a local build
+    restart: unless-stopped
+    # The directory, not the file: an editor that saves by replacing the file
+    # would leave a single-file mount on the old copy, unseen by reloads.
+    volumes:
+      - ./config:/app/config:ro
+    command: ["-config", "/app/config/config.yaml"]
+    ports:
+      - "${SAURON_STATUS_PORT:-3000}:3000"
+      - "${SAURON_REST_PORT:-8080}:8080"
+      - "${SAURON_RPC_PORT:-8081}:8081"
+      - "${SAURON_GRPC_PORT:-8082}:8082"
+    # Assumes the config's `listen: ":3000"`; change both together.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
