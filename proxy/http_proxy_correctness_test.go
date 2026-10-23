@@ -214,6 +214,14 @@ func TestHTTPProxy_WebSocketRejectionCountsOnlyBreakerCodes(t *testing.T) {
 			proxySrv := httptest.NewServer(p)
 			defer proxySrv.Close()
 
+			rejected := metrics.ProxyErrors.WithLabelValues(tt.network, "node-1", "rest", strconv.Itoa(tt.backendCode), "upgrade_rejected")
+			rejectedCount := func() float64 {
+				var m dto.Metric
+				_ = rejected.Write(&m)
+				return m.GetCounter().GetValue()
+			}
+			rejectedBefore := rejectedCount()
+
 			req, _ := http.NewRequest(http.MethodGet, proxySrv.URL+"/websocket", nil)
 			req.Header.Set("Connection", "Upgrade")
 			req.Header.Set("Upgrade", "websocket")
@@ -227,8 +235,24 @@ func TestHTTPProxy_WebSocketRejectionCountsOnlyBreakerCodes(t *testing.T) {
 			if resp.StatusCode != tt.backendCode {
 				t.Errorf("client got %d, want the backend's %d", resp.StatusCode, tt.backendCode)
 			}
-			if got := cb.GetErrorCount(tt.network, "node-1", "rest"); got != tt.wantCBErrs {
-				t.Errorf("circuit breaker errors = %d, want %d", got, tt.wantCBErrs)
+			// The client has its answer before the handler records the outcome:
+			// wait for the upgrade_rejected metric, which comes right before the
+			// breaker decision, then for the breaker count.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				recorded := rejectedCount() - rejectedBefore
+				got := cb.GetErrorCount(tt.network, "node-1", "rest")
+				if recorded == 1 && got == tt.wantCBErrs {
+					time.Sleep(50 * time.Millisecond) // a late, wrong increment would show now
+					if got := cb.GetErrorCount(tt.network, "node-1", "rest"); got != tt.wantCBErrs {
+						t.Errorf("circuit breaker errors = %d, want %d", got, tt.wantCBErrs)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("after 2s: upgrade_rejected recorded %v times, circuit breaker errors = %d, want 1 and %d", recorded, got, tt.wantCBErrs)
+				}
+				time.Sleep(5 * time.Millisecond)
 			}
 		})
 	}
