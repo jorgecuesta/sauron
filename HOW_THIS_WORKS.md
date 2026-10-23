@@ -89,7 +89,7 @@ An endpoint goes `ADVERTISED → VALIDATED → FAILED → RECOVERED`. A validate
 | Metric | Labels | Meaning |
 |---|---|---|
 | `sauron_node_height` | network, node, type, source | Last height read (`source`: internal/external) |
-| `sauron_node_available` | network, node, type | 1 when the last height check passed |
+| `sauron_node_available` | network, node, type | 1 while the node is routable for that protocol (`rest`, `rpc`, `grpc`, ...): its last check passed and the circuit breaker has not taken it out |
 | `sauron_node_websocket_available` | network, node, type | 1 when the WebSocket check passed |
 | `sauron_node_latency_seconds` | network, node, type | Check latency |
 | `sauron_height_check_errors_total` | network, node, type, error_type | Failed height checks |
