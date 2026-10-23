@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Sauron is an intelligent routing proxy for Pocket Network blockchain nodes (Cosmos SDK). It monitors node block heights via periodic health checks and routes client requests (API/RPC/gRPC) to the best available node using a height-based selection algorithm with round-robin load distribution.
+Sauron is a multi-chain routing proxy for blockchain nodes: Cosmos (Pocket Network, its main deployment), EVM, Solana and custom chains, each network with its own type adapter. It monitors node block heights and per-protocol health via periodic checks and routes client requests (REST, RPC, JSON-RPC, WebSocket, gRPC) to a healthy node at the highest height, round-robin among them.
 
 **Key use case**: Off-chain actors (RelayMiners, Gateways, Indexers) point at Sauron instead of individual nodes. Sauron handles failover, load distribution, and cross-region discovery automatically.
 
@@ -19,11 +19,7 @@ make build
 ./bin/sauron
 ```
 
-**Ports** (configurable per network):
-- `:3000` — Status API, health checks, Prometheus metrics
-- `:8080` — API proxy (Cosmos REST)
-- `:8081` — RPC proxy (Tendermint)
-- `:8082` — gRPC proxy (Cosmos gRPC)
+**Ports**: `listen` (status API, health, metrics; usually `:3000`) plus one listener per network endpoint. The Pocket deployment uses `:8080` REST, `:8081` RPC (and WebSocket), `:8082` gRPC.
 
 ## How to Test
 
@@ -33,6 +29,7 @@ make fmt              # gofmt -s + goimports (pinned)
 make lint             # golangci-lint (pinned in the Makefile, run via go run)
 make fmt-check        # fail if gofmt/goimports would change a file
 make ci               # everything CI runs: test + lint + fmt-check
+make mutation         # mutation testing (gremlins, pinned); runs nightly in CI
 go test -race -count=3 ./...  # Flaky test check
 ```
 
@@ -98,8 +95,10 @@ Unit tests prove each function works. Integration tests prove they work **togeth
 #### Level 3: E2E / Docker Tests
 
 For system-level validation with real network calls, real configs, real containers:
-- `make docker-test` — external validation (23 tests)
-- `make docker-test-advanced` — advanced features (27 tests)
+- `make docker-test-protocols` — every client path, failover and recovery against fake nodes (9 checks; no network; runs in CI)
+- `make docker-test` — external validation (19 tests)
+- `make docker-test-advanced` — external failover/recovery, reload, Redis, auth, rate limiting (29 tests)
+- On this workstation another project's Tilt holds 3000/8080: set the `SAURON_*_PORT` variables (see `.docker/TESTING.md`)
 - Run after any change that touches server wiring, config parsing, or proxy routing.
 
 #### Cross-Cutting Rules (All Levels)
@@ -114,58 +113,58 @@ For system-level validation with real network calls, real configs, real containe
 
 ## Config Format
 
+V2 is multi-chain: each network has a `type` (`cosmos`, `evm`, `solana`, `custom`) whose adapter (`adapter/<type>`) supplies the height and health checks; endpoints and node URLs are keyed by protocol. The V1 format (`api_listen`, `internals[].api`) is rejected. `config.default.yaml` is the commented reference; `config.ValidateMultiChain` is the source of truth.
+
 ```yaml
-listen: ":3000"       # Status API
-api: true             # Enable API proxying
-rpc: true             # Enable RPC proxying
-grpc: true            # Enable gRPC proxying
-auth: false           # Bearer token auth on status API
-external_failover_threshold: 2  # Blocks behind before using externals
-
+listen: ":3000"                    # status API: /health, /ready, /metrics, /{network}/status
+external_failover_threshold: 2     # blocks behind before externals are used
 timeouts:
-  health_check: 5s
+  health_check: 5s                 # timeout of each check
   proxy: 60s
-  websocket_idle: 90s   # Close a WebSocket after this long without backend bytes
-
-rate_limit:
-  enabled: true
-  requests_per_second: 100
-  burst: 200
-  trust_proxy: true   # Trust X-Forwarded-For headers
-
-redis:
-  enabled: false
-  uri: "redis://localhost:6379"
+  websocket_idle: 90s              # close a WebSocket after this long without node bytes
 
 networks:
   - name: pocket
-    api: "https://sauron-api.example.com"     # Advertised URL (for external rings)
-    rpc: "https://sauron-rpc.example.com"
-    grpc: "sauron-grpc.example.com:9090"
-    api_listen: ":8080"
-    rpc_listen: ":8081"
-    grpc_listen: ":8082"
+    type: cosmos                   # height from RPC /abci_info (app-committed)
+    height_check:
+      protocol: rpc                # rpc | rest | grpc for cosmos
+      interval: 30s                # per-network check period, live on reload
+    endpoints:                     # what Sauron listens on
+      - protocol: rest
+        listen: ":8080"
+        advertise: "https://sauron-api.example.com"
+      - protocol: rpc              # also proxies WebSocket upgrades
+        listen: ":8081"
+      - protocol: grpc
+        listen: ":8082"
+    circuit_breaker:               # optional
+      threshold: 3
+      http_codes: [502, 503, 504]
+      grpc_codes: [unavailable, internal, unknown, data_loss]
+      retry_attempts: 2
+      retry_backoff: 100ms
+    # archival: {min_height: 1, check_interval: 30s}
+    # sync: {max_drift: 5, oracles: [{url: "https://oracle.example.com"}]}
 
 internals:
-  - name: node-1
+  - name: seed-one
     network: pocket
-    api: "http://node1:1317"
-    rpc: "http://node1:26657"
-    grpc: "node1:9090"
     grpc_insecure: true
+    endpoints:                     # protocol -> node URL
+      rest: "http://seed-one:1317"
+      rpc: "http://seed-one:26657"
+      grpc: "seed-one:9090"
 
-externals:
+externals:                         # other Sauron deployments (status API URLs)
   - name: partner
     token: "shared-secret"
-    rings:
-      - "https://partner-sauron:3000"
+    rings: ["https://partner-sauron:3000"]
 
+auth: false                        # bearer auth on the status API only (not the proxies)
 users:
-  - name: relayminer-1
+  - name: partner-ring
     token: "secret-token"
-    api: true
-    rpc: true
-    grpc: false
+    permissions: all               # or {pocket: {rest: true, rpc: true}}
 ```
 
 Hot reload: edit config.yaml → `kill -HUP <pid>` or file watcher auto-detects. Startup-only fields (`listen`, `auth`, `rate_limit`, `redis`, `timeouts.proxy`, `grpc_keepalive`, networks set/endpoints, `archival` presence, `sync`, `mode`, `height_check`, `grpc_insecure` with an unchanged URL) keep their running values; the rest is applied, `Reload` returns `ErrRestartRequired` and `sauron_config_reload_ok` shows 0 until a restart. The list lives in `config.keepStartupOnly`.
@@ -256,7 +255,7 @@ make ci       # test + lint + fmt-check, exactly what CI runs
 make clean    # Remove binaries
 ```
 
-CI runs `make test`, `make lint` and `make fmt-check` on every pull request and every push to `main`. On git tags (`v*`) it also does the cross-platform build (linux/darwin, amd64/arm64), the GitHub release and the Docker push to ghcr.io/pokt-network/sauron.
+CI runs `make test`, `make lint`, `make fmt-check` and the fake-node L3 suite (`make docker-test-protocols`) on every pull request and every push to `main`; mutation testing runs nightly. On git tags (`v*`) it also does the cross-platform build (linux/darwin, amd64/arm64), the GitHub release and the Docker push to ghcr.io/pokt-network/sauron.
 
 ## Production Environment
 

@@ -1,509 +1,189 @@
 # How Sauron Works
 
-Sauron is an intelligent routing proxy for Pocket Network nodes that selects the best available endpoint based on height with round-robin load distribution.
+Sauron is a multi-chain routing proxy. For each configured network it checks the height and per-protocol health of that network's nodes, and routes every client request to a healthy node at the highest height, round-robin among them. Configuration and the per-chain checks are summarised in the [README](README.md); this document covers the internals.
 
 ## Architecture
 
 ```
-┌─────────────┐         ┌─────────────┐         ┌──────────────┐
-│   Clients   │────────▶│   Sauron    │────────▶│   Backends   │
-│  (API/RPC/  │         │   (Proxy)   │         │  (Internal + │
-│   gRPC)     │         │             │         │   External)  │
-└─────────────┘         └─────────────┘         └──────────────┘
-                               │
-                               ▼
-                        ┌─────────────┐
-                        │  Selector   │
-                        │  (Height +  │
-                        │ Round-Robin)│
-                        └─────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    ▼                     ▼
-             ┌─────────────┐       ┌─────────────┐
-             │  Internal   │       │  External   │
-             │   Nodes     │       │ Endpoints   │
-             └─────────────┘       └─────────────┘
+                     ┌──────────────────────── Sauron ────────────────────────┐
+┌─────────┐ request  │  ┌─────────────┐   pick    ┌──────────┐                 │
+│ Clients │─────────▶│  │ HTTP / gRPC │──────────▶│ Selector │                 │
+└─────────┘          │  │   proxies   │◀──────────│          │                 │
+                     │  └──────┬──────┘   node    └────┬─────┘                 │
+                     │         │ breaker errors       │ reads                 │
+                     │         ▼                      ▼                       │
+                     │  ┌─────────────────────────────────────┐              │
+                     │  │ HeightStore · HealthStore ·          │◀── checks ──┤◀── nodes
+                     │  │ ArchivalStore · OracleStore ·        │   (scheduler,│
+                     │  │ ExternalEndpointStore               │    adapters) │
+                     │  └─────────────────────────────────────┘              │
+                     └─────────────────────────────────────────────────────────┘
 ```
 
-## Core Components
+## Components
 
-### 1. Health Checkers (`checker/`)
-Run periodic health checks on internal nodes:
-- **API Checker**: `GET /cosmos/base/tendermint/v1beta1/blocks/latest`
-- **RPC Checker**: `GET /status`
-- **gRPC Checker**: `cosmos.base.tendermint.v1beta1.Service/GetLatestBlock`
+### Adapters (`adapter/`)
 
-Each checker extracts height and measures latency (10-sample moving average).
+One adapter per network `type`: `cosmos`, `evm`, `solana`, `custom`. Given a network's config, an adapter returns the request that reads a node's height (method, path, body, JSONPath to the height, number format) and the health checks for each protocol the node exposes. The check engine (`adapter/engine.go`) runs those requests; nothing else in Sauron is chain-specific.
 
-### 2. External Endpoint Discovery (`checker/external.go`)
-Queries other Sauron rings via `/status` API to:
-1. Discover advertised endpoints (API, RPC, gRPC)
-2. Validate connectivity
-3. Track health and performance
+For Cosmos the height is the app-committed height from RPC `/abci_info`, not the blockstore height in `/status`: CometBFT saves a block before the app commits it, so `/status` can run a block ahead of what the node can answer.
 
-External endpoints go through states: `ADVERTISED → VALIDATED → [WORKING|FAILED] → RECOVERED`
+### Scheduler (`checker/v2_scheduler.go`)
 
-### 3. Selector (`selector/`)
-Chooses the best endpoint using this algorithm:
-1. **Check internal heights** - find max height among internal nodes
-2. **Threshold check** - add externals only if they're ahead by more than `external_failover_threshold` blocks
-3. **Find max height** among all candidates (internal + external if threshold exceeded)
-4. **Filter** to only nodes at max height
-5. **Distribute requests** among filtered nodes using round-robin
+A one-second tick runs each network's checks when its interval has elapsed: node checks every `height_check.interval`, archival checks every `archival.check_interval`, oracle checks every `sync.check_interval` (all default 30s, read from the current config on every tick). A node's check is never started again while the previous one is still running.
 
-**External Failover Policy:** External endpoints are only added to the candidate pool when:
-- All internal nodes have height 0 (completely failed), OR
-- External max height > internal max height + threshold (default: 2)
+For each internal node:
+- **Height:** through the network's height-check protocol. A result updates the HeightStore and marks that protocol healthy or unhealthy.
+- **Health per protocol:** HTTP checks per the adapter; a WebSocket subscription check for `rpc`/`websocket`; for gRPC, the transport must reach READY and then a real `GetLatestBlock` query must not fail with a node-failure status (`Unavailable`, `Internal`, `Unknown`, `DataLoss`) or time out. Any other answer, `Unimplemented` included, means the node serves.
 
-This prevents overloading external nodes when internals are healthy and only slightly behind.
+External rings are queried every 10s, and failed external endpoints are re-checked every 10s.
 
-### 4. Proxies (`proxy/`)
-- **HTTP Proxy**: Handles API (port 8080) and RPC (port 8081) requests
-- **gRPC Proxy**: Handles gRPC requests (port 8082) with transparent proxying
+### Selector (`selector/`)
 
-Each proxy:
-1. Calls selector for best endpoint
-2. Forwards request to selected backend
-3. Records metrics and errors
-4. Tracks 5xx errors for external endpoint health
+`GetBestNode(network, protocol)`:
+1. Internal nodes with a height, kept only if healthy for the requested protocol.
+2. Archival filter (when `archival` is set) and sync filter (when `sync` is set: drop nodes more than `max_drift` behind the oracles).
+3. External endpoints are added when no internal is left or the best external is more than `external_failover_threshold` blocks ahead.
+4. Nodes at the maximum height, sorted by name, picked round-robin per network and protocol.
 
-### 5. Storage (`storage/`)
-- **HeightStore**: Tracks internal node heights and latencies
-- **ExternalEndpointStore**: Tracks external endpoint states and metrics
+`GetBestWebSocketNode` does the same restricted to WebSocket-capable nodes (before the height comparison, so a WebSocket node a block behind beats none), with its own round-robin counter.
 
-### 6. Metrics (`metrics/`)
-Prometheus metrics for monitoring:
-- Node heights and latencies
-- Routing decisions
-- Proxy request counts and durations
-- External endpoint validation states
-- Error counts and recovery events
+### Proxies (`proxy/`)
 
-## Request Flow
+- **HTTP** (`rest`, `rpc`, `jsonrpc`, `http`): buffers the body (up to 10 MB; larger is 413) for retries, forwards to the selected node keeping the path's escaping, and on a connection error or a code in `circuit_breaker.http_codes` records a breaker error and retries on a newly selected node, up to `retry_attempts`. A client that cancels is neither retried nor counted against the node.
+- **WebSocket** (an upgrade on an HTTP endpoint): routed only to WebSocket-capable nodes. A non-101 answer is forwarded and reported as `upgrade_rejected`; it counts against the node only for codes in `http_codes`. During the session, a node that sends nothing for `timeouts.websocket_idle` (default 90s) is disconnected (`websocket_idle_timeout`); the copy uses splice.
+- **gRPC**: a transparent proxy over raw frames (any service, no proto types), speaking `application/grpc+proto`. Response headers, trailers and status codes pass through unchanged. Node-failure codes (or the network's `grpc_codes`) feed the breaker; other answers reset it. An unreachable node is `Unavailable`.
 
-1. Client sends request to Sauron proxy port
-2. Proxy calls Selector with (network, endpoint_type)
-3. Selector evaluates all candidates (internal + external)
-4. Selector returns endpoint based on height with round-robin distribution
-5. Proxy forwards request to selected backend
-6. Response returned to client
-7. Metrics recorded
+### Circuit breaker (`proxy/circuit_breaker.go`)
 
-## Health Check Cycle
+Per network, node and protocol: `threshold` consecutive errors mark the protocol unhealthy in the HealthStore, so the selector skips it; the next passing health check marks it healthy again. A success resets the count.
 
-Every 5 seconds:
-1. Checkers query all internal nodes
-2. Extract height and measure latency
-3. Update HeightStore with metrics
-4. External checker queries external rings
-5. Validate advertised endpoints
-6. Update ExternalEndpointStore
-7. Failed endpoints retried every 10s
+### Stores (`storage/`)
+
+HeightStore (height, latency, WebSocket availability), HealthStore (per protocol), ArchivalStore, OracleStore, ExternalEndpointStore, and an optional Redis cache of heights. All are safe for concurrent use.
+
+### Reload (`config/`, `server/`)
+
+The config file is watched, and `SIGHUP` reloads it. A file that fails validation is rejected. Startup-only fields keep their running values (the list is in `config.keepStartupOnly`); everything else applies at once. After every applied reload, Sauron forgets removed nodes and externals (store entries, breaker counts, state metrics) and closes pooled gRPC connections to addresses nothing routes to; it does this again once the health-check timeout has passed, in case a check that was running wrote a removed node back.
 
 ## External Endpoint Integration
 
-External endpoints from other Sauron rings are:
-- Discovered via `/status` API
-- Validated for connectivity
-- Tracked in separate store
-- Added to selector candidate pool with `ext:` prefix (only when threshold exceeded)
-- Selected using same height-based round-robin algorithm as internal nodes
+Several Sauron deployments can back each other up. Each one lists the others under `externals`; every 10s it reads `GET <ring>/{network}/status` from each ring (with the ring's token), stores the endpoints the ring advertises, and validates them directly (HTTP reachability, or a gRPC `GetLatestBlock`).
 
-**Threshold-Based Failover:** External endpoints are only added to the candidate pool when internals are significantly behind. This ensures fair resource usage and prevents overloading external deployments.
+An endpoint goes `ADVERTISED → VALIDATED → FAILED → RECOVERED`. A validated endpoint that fails validation, or reaches 3 proxy errors, is FAILED: kept out of routing and re-checked every 10s until it answers. When a ring stops answering, its endpoints are validated directly instead of trusting their last result.
 
-| Internal Height | External Height | Threshold | Result |
-|----------------|-----------------|-----------|--------|
-| 100 | 102 | 2 | Use internal only (102 > 100+2 = false) |
-| 100 | 103 | 2 | Add externals (103 > 100+2 = true) |
-| 0 | 100 | 2 | Add externals (no healthy internal) |
+| Internal height | External height | Threshold | Externals used? |
+|---|---|---|---|
+| 100 | 102 | 2 | No (102 is not more than 100 + 2) |
+| 100 | 103 | 2 | Yes |
+| none healthy | 100 | 2 | Yes |
 
-This enables distributed failover across multiple Sauron deployments while respecting resource boundaries.
+## Authentication
 
-## Configuration
-
-### Basic Configuration
-
-```yaml
-# Status API listen address
-listen: ":3000"
-
-# Enable protocol support
-api: true
-rpc: true
-grpc: true
-
-# External failover threshold (default: 2)
-# Externals added when they're 3+ blocks ahead of internals
-external_failover_threshold: 2
-
-# Timeouts
-timeouts:
-  health_check: 5s  # Timeout of each health check (how often: networks[].height_check.interval)
-  proxy: 60s        # Proxy request timeout
-  websocket_idle: 90s  # Close a WebSocket after this long without backend bytes (default 90s)
-
-# Network proxies
-networks:
-  - name: "pocket"
-    api_listen: ":8080"     # API proxy port
-    rpc_listen: ":8081"     # RPC proxy port
-    grpc_listen: ":8082"    # gRPC proxy port
-    grpc_insecure: true     # Use plaintext gRPC (for testing)
-
-# Internal nodes to monitor
-internals:
-  - name: node-1
-    api: "https://node1.example.com"
-    rpc: "https://node1.example.com:26657"
-    grpc: "node1.example.com:9090"
-    network: "pocket"
-  - name: node-2
-    api: "https://node2.example.com"
-    rpc: "https://node2.example.com:26657"
-    grpc: "node2.example.com:9090"
-    network: "pocket"
-
-# External Sauron rings to query
-externals:
-  - name: partner-sauron
-    token: "shared-secret"
-    rings:
-      - "https://partner.example.com:3000"
-
-# API authentication
-auth: true
-users:
-  - name: relayminer-1
-    token: "secret-token-1"
-    api: true    # Can use API proxy
-    rpc: true    # Can use RPC proxy
-    grpc: true   # Can use gRPC proxy
-```
-
-### Hot Reload
-
-Update configuration without restarting:
-
-```bash
-# Edit config.yaml
-vim config.yaml
-
-# Send SIGHUP signal to reload
-kill -HUP <sauron-pid>
-```
-
-Changes are applied immediately without dropping active connections.
-
-### Authentication
-
-Enable token-based authentication:
-
-```yaml
-auth: true
-
-users:
-  - name: service-1
-    token: "secret-token-1"
-    api: true    # API access granted
-    rpc: false   # RPC access denied
-    grpc: true   # gRPC access granted
-```
-
-Clients must include the token in requests:
-
-```bash
-# API request with auth
-curl -H "Authorization: Bearer secret-token-1" \
-  http://localhost:8080/cosmos/base/tendermint/v1beta1/blocks/latest
-
-# RPC request with auth
-curl -H "Authorization: Bearer secret-token-1" \
-  http://localhost:8081/status
-```
-
-### External Discovery
-
-Configure Sauron to discover endpoints from other deployments:
-
-```yaml
-externals:
-  - name: other-deployment
-    token: "shared-secret"
-    rings:
-      - "https://other.sauron.com:3000"
-```
-
-Sauron will:
-1. Query `https://other.sauron.com:3000/pocket/status`
-2. Discover advertised endpoints (API, RPC, gRPC)
-3. Validate connectivity to each endpoint
-4. Add working endpoints to routing pool
-5. Monitor health and auto-recover failed endpoints
+`auth: true` puts bearer tokens on the **status API** (`/{network}/status`, what other rings read); `users[].permissions` limits a token to networks and protocols (`all`, or a map). `/health`, `/ready` and `/metrics` are open. **The proxy ports have no authentication**: expose them only to the clients that should use them.
 
 ## Monitoring
 
-### Prometheus Metrics
+`GET /metrics` on the status port. The main series, with their labels:
 
-Access metrics at `:3000/metrics`:
+| Metric | Labels | Meaning |
+|---|---|---|
+| `sauron_node_height` | network, node, type, source | Last height read (`source`: internal/external) |
+| `sauron_node_available` | network, node, type | 1 when the last height check passed |
+| `sauron_node_websocket_available` | network, node, type | 1 when the WebSocket check passed |
+| `sauron_node_latency_seconds` | network, node, type | Check latency |
+| `sauron_height_check_errors_total` | network, node, type, error_type | Failed height checks |
+| `sauron_routing_selections_total` | network, type, node_source, reason | Selections (`reason`: height_winner, round_robin, only_available) |
+| `sauron_routing_failures_total` | network, type, reason | No node to route to (`no_nodes`, `no_websocket_nodes`, `zero_height`) |
+| `sauron_node_requests_total` | network, node, type, method | Requests per node (`method`: HTTP verb, `WEBSOCKET`, gRPC service) |
+| `sauron_proxy_request_duration_seconds` | network, node, type, status | Proxied request duration |
+| `sauron_proxy_errors_total` | network, node, type, status_code, error_type | Proxy errors, e.g. `retriable`, `http_error`, `client_cancel`, `body_too_large`, `upgrade_rejected`, `websocket_idle_timeout`, `client_disconnect`; for gRPC, `backend_status`, `client_error`, `proxy_error` |
+| `sauron_config_reload_ok` | — | 0 while a reload is rejected or left startup-only changes pending |
+| `sauron_external_endpoints_{tracked,validated,working}` | network, type, ring_name | External endpoints by state |
+| `sauron_external_endpoint_recoveries_total` | network, type, ring_name | FAILED → working transitions |
 
-#### Node Metrics
-
-```
-# Current block height per node
-sauron_node_height{network="pocket",node="node-1",type="api",source="internal"} 508365
-
-# Health check latency in seconds
-sauron_node_latency_seconds{network="pocket",node="node-1",type="api"} 0.325
-
-# Node availability (1=up, 0=down)
-sauron_node_available{network="pocket",node="node-1",type="api"} 1
-```
-
-#### Routing Metrics
-
-```
-# Routing decisions made (by node and reason)
-sauron_node_selections_total{network="pocket",type="api",node="node-1",reason="height"} 142
-
-# Number of candidates considered per routing decision
-sauron_routing_alternatives_considered{network="pocket",type="api"} 3
-```
-
-#### Proxy Metrics
-
-```
-# Total requests proxied
-sauron_proxy_requests_total{network="pocket",node="node-1",type="api",method="GET"} 1523
-
-# Request duration histogram
-sauron_proxy_request_duration_seconds_bucket{network="pocket",node="node-1",type="api",status="200",le="0.1"} 1420
-
-# Proxy errors
-sauron_proxy_errors_total{network="pocket",node="node-1",type="api",status="503",reason="backend_unavailable"} 3
-```
-
-#### External Endpoint Metrics
-
-```
-# Endpoints discovered from external rings
-sauron_external_endpoints_tracked{network="pocket",type="api",external="partner-sauron"} 3
-
-# Endpoints successfully validated
-sauron_external_endpoints_validated{network="pocket",type="api",external="partner-sauron"} 2
-
-# Failed endpoints that recovered
-sauron_external_endpoint_recoveries_total{network="pocket",type="api",external="partner-sauron"} 1
-```
-
-### Grafana Dashboard
-
-Example PromQL queries:
+Example PromQL:
 
 ```promql
-# Average node height by type
-avg by (type) (sauron_node_height)
-
-# Nodes currently at max height
+# Nodes at their network's max height
 sauron_node_height == on (network, type) group_left max by (network, type) (sauron_node_height)
 
 # Request rate per node
-rate(sauron_proxy_requests_total[5m])
+sum by (network, node) (rate(sauron_node_requests_total[5m]))
 
-# P95 latency
-histogram_quantile(0.95, rate(sauron_proxy_request_duration_seconds_bucket[5m]))
+# P95 proxied latency per network
+histogram_quantile(0.95, sum by (network, le) (rate(sauron_proxy_request_duration_seconds_bucket[5m])))
 
-# External endpoint health
-sauron_external_endpoints_validated / sauron_external_endpoints_tracked
+# Error ratio by kind
+sum by (network, error_type) (rate(sauron_proxy_errors_total[5m]))
 ```
 
 ## Production Deployment
 
-### Recommended Setup
-
-Deploy Sauron in multiple regions with cross-region failover:
-
-```
-┌─────────────┐           ┌─────────────┐           ┌─────────────┐
-│  Sauron A   │ ◀────────▶│  Sauron B   │◀─────────▶│  Sauron C   │
-│  (Region 1) │  External │  (Region 2) │  External │  (Region 3) │
-│             │  Discovery│             │  Discovery│             │
-└─────────────┘           └─────────────┘           └─────────────┘
-       │                         │                         │
-       ▼                         ▼                         ▼
-  Internal Nodes           Internal Nodes           Internal Nodes
-  (Validators,             (Validators,             (Validators,
-   Full Nodes)              Full Nodes)              Full Nodes)
-```
-
-**Benefits:**
-- Each region monitors local nodes (low latency health checks)
-- Cross-region failover via external discovery
-- Distributed observability
-- Independent deployments (no single point of failure)
-
-**Configuration for Region A:**
+Run one Sauron per region, each with its region's nodes as internals and the other regions as externals:
 
 ```yaml
 listen: ":3000"
-
+timeouts:
+  health_check: 5s
+  proxy: 60s
 networks:
-  - name: "pocket"
-    api_listen: ":8080"
-    rpc_listen: ":8081"
-    grpc_listen: ":8082"
-
-# Local nodes in Region 1
+  - name: pocket
+    type: cosmos
+    endpoints:
+      - protocol: rest
+        listen: ":8080"
+        advertise: "https://api.region1.example.com"
+      - protocol: rpc
+        listen: ":8081"
+        advertise: "https://rpc.region1.example.com"
+      - protocol: grpc
+        listen: ":8082"
+        advertise: "grpc.region1.example.com:443"
 internals:
   - name: region1-node-1
-    api: "https://node1.region1.internal"
-    rpc: "https://node1.region1.internal:26657"
-    grpc: "node1.region1.internal:9090"
-    network: "pocket"
-  - name: region1-node-2
-    api: "https://node2.region1.internal"
-    rpc: "https://node2.region1.internal:26657"
-    grpc: "node2.region1.internal:9090"
-    network: "pocket"
-
-# Other Sauron deployments
+    network: pocket
+    endpoints:
+      rest: "http://node1.region1.internal:1317"
+      rpc: "http://node1.region1.internal:26657"
+      grpc: "node1.region1.internal:9090"
+    grpc_insecure: true
 externals:
-  - name: region2-sauron
+  - name: region2
     token: "shared-secret-region2"
-    rings:
-      - "https://sauron.region2.internal:3000"
-  - name: region3-sauron
-    token: "shared-secret-region3"
-    rings:
-      - "https://sauron.region3.internal:3000"
+    rings: ["https://sauron.region2.example.com:3000"]
+auth: true
+users:
+  - name: region2
+    token: "shared-secret-region1"
+    permissions: all
 ```
 
-### Security Considerations
-
-1. **Token Security**
-   - Use strong, unique tokens for each user/service
-   - Rotate tokens periodically
-   - Store tokens securely (environment variables, secrets manager)
-
-2. **Network Isolation**
-   - Run Sauron in private network when possible
-   - Use VPN or private peering between regions
-   - Restrict external ring discovery to trusted deployments
-
-3. **TLS**
-   - Use HTTPS for external ring discovery
-   - Enable TLS for gRPC in production (`grpc_insecure: false`)
-   - Use valid certificates (not self-signed)
-
-4. **Firewall Rules**
-   - Limit access to status API (`:3000`) to monitoring systems only
-   - Restrict proxy ports (`:8080`, `:8081`, `:8082`) to authorized clients
-   - Use network policies or security groups
-
-5. **Resource Limits**
-   - Set reasonable `proxy` timeouts to prevent hanging connections
-   - Monitor memory usage and set limits
-   - Use rate limiting if needed
-
-### Docker Deployment
-
-See `.docker/` directory for production-ready containerization:
+### Docker and Kubernetes
 
 ```bash
-# Build image
 docker build -f .docker/Dockerfile -t sauron:latest .
-
-# Run container
-docker run -d \
-  --name sauron \
-  -p 3000:3000 \
-  -p 8080:8080 \
-  -p 8081:8081 \
-  -p 8082:8082 \
-  -v /path/to/config.yaml:/app/config.yaml:ro \
-  sauron:latest
+docker run -d --name sauron -p 3000:3000 -p 8080-8082:8080-8082 \
+  -v /path/to/config.yaml:/app/config.yaml:ro sauron:latest
 ```
 
-### Health Checks
+Probes: `/health` for liveness and `/ready` for readiness. `/ready` only checks that internal nodes are configured; it stays 200 when none of them is routable.
 
-Kubernetes/Docker health check:
+### Security
 
-```yaml
-livenessProbe:
-  httpGet:
-    path: /health
-    port: 3000
-  initialDelaySeconds: 10
-  periodSeconds: 10
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: 3000
-  initialDelaySeconds: 5
-  periodSeconds: 5
-```
+- The proxy ports are unauthenticated: keep them on private networks or behind a gateway.
+- Use HTTPS for rings and TLS for gRPC to nodes outside a trusted network (`grpc_insecure: false`).
+- External rings choose what they advertise: only list rings you trust.
+- Keep `timeouts.proxy` bounded, and enable `rate_limit` on a status API that is reachable from outside.
 
 ## Troubleshooting
 
-### Node Selection Issues
+**A node is not getting traffic:** check `sauron_node_available` and `sauron_node_height` for it (it may be behind or failing a check), the logs for "Circuit breaker tripped", and `sauron_routing_selections_total` for its network.
 
-**Problem:** Sauron not routing to expected node
+**Requests fail with "No available nodes":** `sauron_routing_failures_total` gives the reason (`no_nodes`, `no_websocket_nodes`, `zero_height`); every node is unhealthy for that protocol or has no height yet.
 
-**Debug:**
-1. Check selector metrics: `sauron_node_selections_total`
-2. Verify node heights: `sauron_node_height`
-3. Check node availability: `sauron_node_available`
-4. Review logs for selection decisions
+**External endpoints unused:** compare `sauron_external_endpoints_{tracked,validated,working}`; they are only used when internals fall behind by more than the threshold. Check the ring's token and that it advertises endpoints.
 
-**Common causes:**
-- Node actually has lower height than expected
-- Node health checks failing
-- Round-robin distribution selecting different nodes
+**gRPC failures:** `grpc_insecure` must match the node (plaintext vs TLS); node addresses are `host:port` without a scheme. `sauron_proxy_errors_total{type="grpc"}` shows whether the status came from the node (`backend_status`), the client (`client_error`) or Sauron (`proxy_error`).
 
-### External Endpoint Discovery
-
-**Problem:** External endpoints not discovered
-
-**Debug:**
-1. Check tracked endpoints: `sauron_external_endpoints_tracked`
-2. Verify validated endpoints: `sauron_external_endpoints_validated`
-3. Test manual access to external ring status API
-4. Check authentication token
-
-**Common causes:**
-- Network connectivity issues
-- Incorrect token
-- External ring not advertising endpoints
-- Firewall blocking access
-
-### gRPC Issues
-
-**Problem:** gRPC requests failing
-
-**Debug:**
-1. Check `grpc_insecure` setting matches backend
-2. Test with `grpcurl` directly to backend
-3. Verify gRPC endpoint format (no `http://` prefix)
-4. Check TLS certificate validity
-
-**Common causes:**
-- TLS handshake failures (use `grpc_insecure: true` for testing)
-- Incorrect endpoint format
-- Backend not supporting gRPC reflection
-
-### Performance Issues
-
-**Problem:** High latency or slow responses
-
-**Debug:**
-1. Check proxy duration metrics: `sauron_proxy_request_duration_seconds`
-2. Compare to health check latency: `sauron_node_latency_seconds`
-3. Review backend performance
-4. Check network conditions
-
-**Common causes:**
-- Backend node overloaded
-- Network congestion
-- Too many concurrent requests
-- Proxy timeout too low
+**Reload did not apply:** `sauron_config_reload_ok` is 0 and the log says which startup-only fields need a restart, or why the file was rejected.

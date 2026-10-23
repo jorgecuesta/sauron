@@ -1,31 +1,34 @@
 # Docker Testing Environment
 
-This directory contains Docker Compose setup for testing Sauron with external endpoint validation.
+Two L3 environments live here:
+
+- **Fake nodes** (`docker-compose.fake.yaml`): Sauron in front of two deterministic fake Cosmos nodes (`internal/fakenode`, built by `Dockerfile.fakenode`). No network access needed; it runs in CI on every PR.
+- **Primary + secondary rings** (`docker-compose.yaml`): two Sauron deployments, the primary using the secondary as an external ring, in front of real nodes.
 
 ## Files
 
-- `Dockerfile` - Multi-stage build for Sauron container
-- `docker-compose.yaml` - Primary + Secondary ring setup
-- `config-primary-docker.yaml` - Primary configuration (monitors secondary as external)
-- `config-secondary-docker.yaml` - Secondary configuration (leaf node)
-- `test-external-validation.sh` - Basic endpoint validation tests (23 tests)
-- `test-advanced-features.sh` - Advanced feature tests (15 tests)
+- `Dockerfile` - Multi-stage build for the Sauron container
+- `Dockerfile.fakenode`, `docker-compose.fake.yaml`, `config-fake.yaml` - Fake-node environment
+- `test-protocols.sh` - Every client path (REST, RPC GET/POST, WebSocket, gRPC with metadata), failover, recovery and all-nodes-down, against fake nodes (9 checks)
+- `docker-compose.yaml` - Primary + secondary ring setup
+- `config-primary-docker.yaml` - Primary configuration (monitors the secondary as an external)
+- `config-secondary-docker.yaml` - Secondary configuration
+- `test-external-validation.sh` - External endpoint validation (19 tests)
+- `test-advanced-features.sh` - External failover and recovery, hot reload, Redis, auth, rate limiting, status endpoints, endpoint state transitions (29 tests)
 
-IMPORTANT: you need to provide valid endpoints on the `config-[primary|secondary]-docker.yaml` to test
+The ring environment needs reachable nodes in `config-[primary|secondary]-docker.yaml`.
 
 ## Quick Start
 
 From project root:
 
 ```bash
-# Start environment
-make docker-up
+make docker-test-protocols      # fake nodes; no network needed
 
-# Run tests
-make docker-test                # Basic validation
-make docker-test-advanced       # Advanced features
+make docker-test                # ring environment: external validation
+make docker-test-advanced       # ring environment: advanced features
 
-# Stop environment
+make docker-up                  # or keep the ring environment up to test by hand
 make docker-down
 ```
 
@@ -47,7 +50,7 @@ then includes them in routing decisions alongside internal nodes.
 
 ## Running alongside other services
 
-Host ports default to 3000/4000 (status), 8080-8082 and 7080-7082 (proxies) and 6379 (Redis). If something else holds them, override any of them:
+The ring environment's host ports default to 3000/4000 (status), 8080-8082 and 7080-7082 (proxies) and 6379 (Redis). If something else holds them (check with `ss -ltnp`), override any of them:
 
 ```bash
 SAURON_PRIMARY_STATUS_PORT=23000 SAURON_SECONDARY_STATUS_PORT=24000 SAURON_REDIS_PORT=26379 \
@@ -55,3 +58,5 @@ SAURON_PRIMARY_API_PORT=28080 SAURON_PRIMARY_RPC_PORT=28081 SAURON_PRIMARY_GRPC_
 SAURON_SECONDARY_API_PORT=27080 SAURON_SECONDARY_RPC_PORT=27081 SAURON_SECONDARY_GRPC_PORT=27082 \
 make docker-test
 ```
+
+The fake-node environment uses `SAURON_FAKE_*_PORT` (defaults 33000 and 38080-38082, admin 38100-38101).
