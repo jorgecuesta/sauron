@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"sauron/internal/grpcutil"
 	"sauron/internal/testutil"
 	"sauron/metrics"
 	"sauron/selector"
@@ -733,7 +734,7 @@ func TestMutationKill_GRPCProxy_ReplacingShutdownConnectionLogsCloseFailure(t *t
 	p.logger = logger
 	const addr = "127.0.0.1:19004"
 	old := closedConn(t, addr)
-	p.connPool[addr] = old
+	p.connPool[grpcutil.ConnKey(addr, true)] = old
 
 	conn, err := p.getOrCreateConnection(addr, true)
 	if err != nil {

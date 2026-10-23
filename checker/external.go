@@ -29,7 +29,7 @@ type ExternalChecker struct {
 	configLoader    *config.MultiChainLoader
 	client          *http.Client
 	logger          *zap.Logger
-	grpcConnections *xsync.Map[string, *grpc.ClientConn] // url -> connection pool for external gRPC endpoints
+	grpcConnections *xsync.Map[string, *grpc.ClientConn] // grpcutil.ConnKey(url, transport) -> connection to an external gRPC endpoint
 }
 
 // ExternalStatusResponse represents the V2 response from another Sauron's status API.
@@ -199,9 +199,11 @@ func (c *ExternalChecker) validateEndpoint(ctx context.Context, externalName, ri
 
 	switch endpointType {
 	case "grpc":
-		// gRPC validation — use insecure by default for external gRPC endpoints
-		// since we don't have per-external node TLS config.
-		latency, err = c.validateGRPCEndpoint(ctx, url, true)
+		var insecure bool
+		latency, insecure, err = c.validateGRPCAnyTransport(ctx, url)
+		if err == nil {
+			c.endpointStore.SetGRPCTransport(externalName, ringURL, network, endpointType, url, insecure)
+		}
 	default:
 		// All non-gRPC protocols (rest, rpc, jsonrpc, http) use HTTP validation.
 		latency, err = c.validateHTTPEndpoint(ctx, url)
@@ -315,13 +317,37 @@ func (c *ExternalChecker) validateGRPCEndpoint(ctx context.Context, url string, 
 	return latency, nil
 }
 
+// validateGRPCAnyTransport validates a gRPC endpoint over TLS or plaintext: a
+// ring does not say which its endpoint speaks. It tries the transport that
+// last worked for url first (TLS when none did), then the other, and returns
+// the one that answered (insecure means plaintext).
+func (c *ExternalChecker) validateGRPCAnyTransport(ctx context.Context, url string) (time.Duration, bool, error) {
+	first, _ := c.endpointStore.GRPCTransport(url)
+	latency, err := c.validateGRPCEndpoint(ctx, url, first)
+	if err == nil {
+		return latency, first, nil
+	}
+	latency, err2 := c.validateGRPCEndpoint(ctx, url, !first)
+	if err2 == nil {
+		return latency, !first, nil
+	}
+	return latency, false, fmt.Errorf("%s: %w; %s: %w", transportName(first), err, transportName(!first), err2)
+}
+
+func transportName(insecure bool) string {
+	if insecure {
+		return "plaintext"
+	}
+	return "tls"
+}
+
 // getGRPCConnection returns an existing connection or creates a new one.
 // LoadOrCompute guarantees the factory runs exactly once per key, eliminating
 // the TOCTOU race where two goroutines both see a cache miss and both create connections.
 func (c *ExternalChecker) getGRPCConnection(url string, useInsecure bool) (*grpc.ClientConn, error) {
 	var createErr error
 
-	conn, _ := c.grpcConnections.LoadOrCompute(url, func() (newConn *grpc.ClientConn, cancel bool) {
+	conn, _ := c.grpcConnections.LoadOrCompute(grpcutil.ConnKey(url, useInsecure), func() (newConn *grpc.ClientConn, cancel bool) {
 		newConn, createErr = c.createGRPCConnection(url, useInsecure)
 		if createErr != nil {
 			return nil, true // cancel the store; don't cache a nil value
@@ -395,7 +421,11 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 
 		switch ep.Type {
 		case "grpc":
-			latency, err = c.validateGRPCEndpoint(ctx, ep.URL, true)
+			var insecure bool
+			latency, insecure, err = c.validateGRPCAnyTransport(ctx, ep.URL)
+			if err == nil {
+				c.endpointStore.SetGRPCTransport(ep.ExternalName, ep.RingURL, ep.Network, ep.Type, ep.URL, insecure)
+			}
 		default:
 			latency, err = c.validateHTTPEndpoint(ctx, ep.URL)
 		}
@@ -435,11 +465,11 @@ func (c *ExternalChecker) RecoverFailedEndpoints(ctx context.Context) {
 // returns how many it closed.
 func (c *ExternalChecker) CloseConnectionsExcept(keep func(url string) bool) int {
 	n := 0
-	c.grpcConnections.Range(func(url string, conn *grpc.ClientConn) bool {
-		if keep(url) {
+	c.grpcConnections.Range(func(key string, conn *grpc.ClientConn) bool {
+		if keep(grpcutil.ConnTarget(key)) {
 			return true
 		}
-		if _, loaded := c.grpcConnections.LoadAndDelete(url); loaded {
+		if _, loaded := c.grpcConnections.LoadAndDelete(key); loaded {
 			_ = conn.Close()
 			n++
 		}

@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"sauron/internal/grpcutil"
 	"sauron/internal/testutil"
 	"sauron/selector"
 	"sauron/storage"
@@ -400,8 +401,8 @@ func TestGRPCProxy_CloseConnectionsExcept(t *testing.T) {
 	h.proxy.connMu.RLock()
 	var addr string
 	var conn *grpc.ClientConn
-	for a, c := range h.proxy.connPool {
-		addr, conn = a, c
+	for key, c := range h.proxy.connPool {
+		addr, conn = grpcutil.ConnTarget(key), c
 	}
 	h.proxy.connMu.RUnlock()
 	if conn == nil {

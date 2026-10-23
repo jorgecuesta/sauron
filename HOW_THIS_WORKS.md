@@ -68,7 +68,7 @@ The config file is watched, and `SIGHUP` reloads it. A file that fails validatio
 
 ## External Endpoint Integration
 
-Several Sauron deployments can back each other up. Each one lists the others under `externals`; every 10s it reads `GET <ring>/{network}/status` from each ring (with the ring's token), stores the endpoints the ring advertises, and validates them directly (HTTP reachability, or a gRPC `GetLatestBlock`).
+Several Sauron deployments can back each other up. Each one lists the others under `externals`; every 10s it reads `GET <ring>/{network}/status` from each ring (with the ring's token), stores the endpoints the ring advertises, and validates them directly (HTTP reachability, or a gRPC `GetLatestBlock`). A ring does not say whether its gRPC endpoint speaks TLS or plaintext: validation tries TLS, then plaintext, and the proxy dials the endpoint with whichever answered.
 
 An endpoint goes `ADVERTISED → VALIDATED → FAILED → RECOVERED`. A validated endpoint that fails validation, or reaches 3 proxy errors, is FAILED: kept out of routing and re-checked every 10s until it answers. When a ring stops answering, its endpoints are validated directly instead of trusting their last result.
 

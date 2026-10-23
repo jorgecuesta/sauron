@@ -231,3 +231,60 @@ func TestExternalEndpoints_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestExternalEndpointStore_GRPCTransport(t *testing.T) {
+	t.Parallel()
+
+	s := NewExternalEndpointStore(zap.NewNop())
+	if _, known := s.GRPCTransport("grpc.example.com:443"); known {
+		t.Fatal("unknown URL: want known=false")
+	}
+
+	s.StoreAdvertised("ring-a", "https://ring-a:3000", "pocket", "grpc", "grpc.example.com:443")
+	if _, known := s.GRPCTransport("grpc.example.com:443"); known {
+		t.Fatal("advertised but never validated: want known=false")
+	}
+
+	s.SetGRPCTransport("ring-a", "https://ring-a:3000", "pocket", "grpc", "grpc.example.com:443", false)
+	if insecure, known := s.GRPCTransport("grpc.example.com:443"); !known || insecure {
+		t.Fatalf("after TLS validation: got insecure=%v known=%v", insecure, known)
+	}
+	s.SetGRPCTransport("ring-a", "https://ring-a:3000", "pocket", "grpc", "grpc.example.com:443", true)
+	if insecure, known := s.GRPCTransport("grpc.example.com:443"); !known || !insecure {
+		t.Fatalf("after plaintext validation: got insecure=%v known=%v", insecure, known)
+	}
+
+	// Setting it on an endpoint the store does not hold changes nothing.
+	s.SetGRPCTransport("ring-b", "https://ring-b:3000", "pocket", "grpc", "other:9090", true)
+	if _, known := s.GRPCTransport("other:9090"); known {
+		t.Fatal("non-existent endpoint: want known=false")
+	}
+}
+
+// Concurrent writes and reads of the transport, for the race detector.
+func TestExternalEndpointStore_GRPCTransportConcurrent(t *testing.T) {
+	t.Parallel()
+
+	s := NewExternalEndpointStore(zap.NewNop())
+	s.StoreAdvertised("ring-a", "https://ring-a:3000", "pocket", "grpc", "g:443")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				s.SetGRPCTransport("ring-a", "https://ring-a:3000", "pocket", "grpc", "g:443", (i+j)%2 == 0)
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				s.GRPCTransport("g:443")
+			}
+		}()
+	}
+	wg.Wait()
+	if _, known := s.GRPCTransport("g:443"); !known {
+		t.Fatal("want known=true after concurrent writes")
+	}
+}

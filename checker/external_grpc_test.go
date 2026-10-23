@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"sauron/config"
+	"sauron/internal/grpcutil"
 )
 
 // Answers of fakeTMService.GetLatestBlock.
@@ -111,7 +112,7 @@ func TestValidateGRPCEndpoint(t *testing.T) {
 	}
 }
 
-// One connection per endpoint URL is created and reused across validations;
+// One connection per endpoint URL and transport is created and reused across validations;
 // the warmup call on creation also reaches the node.
 func TestValidateGRPCEndpoint_ReusesConnection(t *testing.T) {
 	t.Parallel()
@@ -123,7 +124,7 @@ func TestValidateGRPCEndpoint_ReusesConnection(t *testing.T) {
 			t.Fatalf("validation %d: %v", i, err)
 		}
 	}
-	first, ok := checker.grpcConnections.Load(addr)
+	first, ok := checker.grpcConnections.Load(grpcutil.ConnKey(addr, true))
 	if !ok {
 		t.Fatal("no cached connection")
 	}
@@ -132,7 +133,7 @@ func TestValidateGRPCEndpoint_ReusesConnection(t *testing.T) {
 	if n != 1 {
 		t.Errorf("cached connections = %d, want 1", n)
 	}
-	if again, _ := checker.grpcConnections.Load(addr); again != first {
+	if again, _ := checker.grpcConnections.Load(grpcutil.ConnKey(addr, true)); again != first {
 		t.Error("cached connection replaced")
 	}
 	if got := svc.calls.Load(); got != 4 {
@@ -151,7 +152,7 @@ func TestValidateGRPCEndpoint_WarmupFailureKeepsConnection(t *testing.T) {
 	if _, err := checker.validateGRPCEndpoint(ctx, addr, true); err == nil {
 		t.Fatal("validation succeeded against a failing node")
 	}
-	if _, ok := checker.grpcConnections.Load(addr); !ok {
+	if _, ok := checker.grpcConnections.Load(grpcutil.ConnKey(addr, true)); !ok {
 		t.Fatal("connection not cached after a failed warmup")
 	}
 	svc.mode.Store(tmBlock)
