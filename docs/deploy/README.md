@@ -109,9 +109,12 @@ No manifests ship in this repository. What a manifest needs:
   here), so live fields apply without a restart.
 - **Validate the file before applying it**: run the same image with
   `-validate` against it, locally or in CI.
-- **Probes**: liveness `GET /health` on 3000. Readiness `GET /ready` returns
-  200 as soon as internal nodes are configured, whether or not one is routable
-  (issue #29), so it does not take a replica out when its nodes are down.
+- **Probes**: liveness `GET /health` on 3000. Readiness `GET /ready` answers
+  503 until the first round of checks has finished (measured: about 1.5s after
+  start against the stand-in), then 200 for good. It does not follow node
+  health, so a replica stays in the Service when its nodes are down and
+  clients get Sauron's fast `503 No available nodes` instead of connection
+  errors.
 - **Replicas** need nothing shared: each checks and routes on its own.
 - **Services**: one for the status port, and one per network port your clients
   use. gRPC needs HTTP/2 end to end: an L4 Service passes it; an ingress must

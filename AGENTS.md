@@ -29,8 +29,11 @@ lists what breaks a deployment.
 7. **Some changes need a restart.** After a reload, `sauron_config_reload_ok`
    at 0 means startup-only fields changed and keep their old values until a
    restart (list in [the deploy README](docs/deploy/README.md#reload-and-restart)).
-8. **`/ready` at 200 does not mean a node is routable** (issue #29). Prove
-   routing with `sauron_node_available` and a real request through each port.
+8. **`/ready` at 200 does not mean a node is routable.** It answers 503
+   until the first round of checks has finished, then 200 for good, even when
+   every node is down (by design: replicas sharing nodes must not all leave the
+   load balancer at once). Prove routing with `sauron_node_available` and a
+   real request through each port.
 9. **The example's node is a stand-in.** It is the Pocket Network
    Foundation's public beta endpoint. Replace it with the human's own nodes
    before real traffic goes through, and never point load at it.

@@ -73,8 +73,16 @@ $C logs sauron 2>&1 | grep -E 'Height check failed|No nodes available'
 - Every node down: with one node there is nothing to fail over to. List at
   least 2.
 
-`/ready` stays `Ready 200` through all of this (issue #29): it does not check
-routing.
+`/ready` stays `Ready 200` through all of this: after the first round of
+checks it does not follow node health, by design.
+
+## Not ready
+
+`GET /ready` answers `503 Service not ready: first health checks not finished`:
+the first round of checks has not finished (every internal node checked
+once; with only external rings, the rings queried once). Measured: about 1.5s
+after start. If it lasts longer than `timeouts.health_check` plus a second,
+read `$C logs sauron`: the server may not have started its checks.
 
 ## Reload did not apply
 

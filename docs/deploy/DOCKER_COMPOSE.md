@@ -241,10 +241,12 @@ instead of the version; the release image prints the tag (not verified until
 v2.0.0-beta.3 is published). `/pocket/status` lists `endpoints` too once `advertise` URLs are set.
 
 **If not**: `connection refused`: the container is not up (step 4) or the
-port is mapped elsewhere (`.env`). `{"height":0}` in the first 30 seconds:
-the first check has not finished; wait and repeat.
+port is mapped elsewhere (`.env`). `Service not ready: first health checks
+not finished 503`, or `{"height":0}`: the first checks have not finished
+(measured: `/ready` turned 200 about 1.5s after start); wait and repeat.
 
-`/ready` at 200 does not prove a node is routable (issue #29). Step 6 does.
+`/ready` at 200 means the first checks ran, not that a node is routable: it
+stays 200 when every node is down. Step 6 checks the nodes.
 
 ## Step 6: check the node
 
