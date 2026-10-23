@@ -736,14 +736,8 @@ func TestRecoverFailedEndpoints_Recovers(t *testing.T) {
 func TestRecoverFailedEndpoints_StillFailing(t *testing.T) {
 	t.Parallel()
 
-	// Get a free local port, then immediately close the listener so the port is
-	// released but nothing is listening on it.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to allocate local port: %v", err)
-	}
-	closedURL := fmt.Sprintf("http://%s", ln.Addr().String())
-	_ = ln.Close() // Close so nothing is listening.
+	// Port 1 is privileged and never bound: nothing listens there.
+	closedURL := "http://127.0.0.1:1"
 
 	checker, _, endpointStore := newTestExternalChecker(t, nil)
 
@@ -785,13 +779,8 @@ func TestRecoverFailedEndpoints_MultipleEndpoints(t *testing.T) {
 	}))
 	defer goodSrv.Close()
 
-	// Second endpoint remains down.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to allocate port: %v", err)
-	}
-	badURL := fmt.Sprintf("http://%s", ln.Addr().String())
-	_ = ln.Close()
+	// Second endpoint remains down (port 1 is never bound).
+	badURL := "http://127.0.0.1:1"
 
 	checker, _, endpointStore := newTestExternalChecker(t, nil)
 

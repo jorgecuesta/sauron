@@ -27,16 +27,12 @@ import (
 	"sauron/storage"
 )
 
-// deadAddr returns a host:port nothing listens on (connection refused at once).
+// deadAddr returns a host:port nothing listens on (connection refused at
+// once). Port 1 is privileged and never bound; a port bound and closed here
+// could be reused meanwhile by a parallel test's server.
 func deadAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	return "127.0.0.1:1"
 }
 
 // TestOracleCheckDue_PassesDefaultIntervalWhenUnset pins oracle_checker.go
